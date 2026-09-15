@@ -139,8 +139,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   }
 
   pluginCtx.effect(() => {
-    // 关窗兜底：宿主只在停用/卸载时收尾插件进程，应用退出时不清理，而子进程不会随父进程
-    // 消失——留下的是占着端口与显存的孤儿。
+    // 关窗兜底：销毁前发出结束命令（到达宿主即执行），防孤儿进程占端口与显存
     const onHide = (): void => deps?.host.killOnShutdown();
     window.addEventListener("pagehide", onHide);
     window.addEventListener("beforeunload", onHide);

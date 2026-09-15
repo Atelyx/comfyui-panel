@@ -22,7 +22,7 @@
     "scope": "app",
     "bundle": true,
     "tagline": "把本机 ComfyUI 嵌进 Atelyx：编排、生成队列与结果落库",
-    "atelyxVersionMin": "0.4.3",
+    "atelyxVersionMin": "0.4.7",
     "declares": [
       "shell",
       "state",
@@ -30,7 +30,10 @@
       "vault",
       "notification",
       "dialog",
-      "native"
+      "native",
+      "app",
+      "clipboard",
+      "services"
     ],
     "permissions": {
       "shell": "按你的配置启动与停止 ComfyUI 进程（可在设置里改为「仅检测」不托管进程）",
@@ -39,7 +42,10 @@
       "vault": "把生成结果写入当前仓库的附件目录；清理落库过程中的临时文件",
       "notification": "启动失败、连接失败、落库结果等提示",
       "dialog": "选择 ComfyUI 安装目录与导入工作流文件",
-      "native": "调用宿主的附件导入命令，把生成结果的图片字节落进仓库附件目录（插件上下文没有二进制写盘通道）"
+      "native": "调用宿主的附件导入命令，把生成结果的图片字节落进仓库附件目录（插件上下文没有二进制写盘通道）",
+      "app": "读取宿主平台信息，决定启动命令的写法",
+      "clipboard": "把工作流 API JSON 复制到剪贴板",
+      "services": "查询宿主可选服务（笔记），用于保存结果后追加到当前笔记"
     }
   }
 }
