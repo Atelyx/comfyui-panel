@@ -25,6 +25,8 @@ import {
   countDisabledNodes,
   displayValue,
   fieldKey,
+  fieldLabel,
+  isCommonField,
   readField,
   writeField,
   type FieldSpec,
@@ -32,20 +34,32 @@ import {
 import {
   Button,
   Checkbox,
+  Chip,
+  CollapseCard,
+  CopyIcon,
   Empty,
+  FolderIcon,
+  ImageIcon,
   Notice,
   Panel,
-  ProgressBar,
+  PlayIcon,
+  RefreshIcon,
+  SearchIcon,
   SectionTitle,
   Select,
+  SquareIcon,
   StatusDot,
   TextArea,
   TextInput,
   Toolbar,
+  UploadIcon,
+  ZapIcon,
+  accent,
   bgSecondary,
   border,
   danger,
   textMuted,
+  textPrimary,
   textSecondary,
   hover,
   FONT_SM,
@@ -73,6 +87,8 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const [busy, setBusy] = React.useState(false);
   const [actionError, setActionError] = React.useState("");
   const [filter, setFilter] = React.useState("");
+  const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(new Set());
+  const [dragOver, setDragOver] = React.useState(false);
   const [previewKey, setPreviewKey] = React.useState<string | null>(null);
   const [savingKey, setSavingKey] = React.useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -126,16 +142,63 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
     );
   }, [fields, filter]);
 
-  /** 按节点分组，便于用户对上 ComfyUI 里的节点。 */
-  const groups = React.useMemo(() => {
+  /** 置顶的常用参数（提示词/种子/采样/尺寸），带节点标题作区分。 */
+  const commonFields = React.useMemo(
+    () => visibleFields.filter(isCommonField),
+    [visibleFields],
+  );
+
+  /** 其余字段按节点分组，便于用户对上 ComfyUI 里的节点。 */
+  const nodeGroups = React.useMemo(() => {
     const map = new Map<string, FieldSpec[]>();
     for (const field of visibleFields) {
+      if (isCommonField(field)) continue;
       const list = map.get(field.nodeId) ?? [];
       list.push(field);
       map.set(field.nodeId, list);
     }
     return Array.from(map.entries());
   }, [visibleFields]);
+
+  // 换工作流时把非常用节点默认折叠，只铺开常用参数；筛选时忽略折叠态
+  React.useEffect(() => {
+    const ids = new Set<string>();
+    for (const field of fields) {
+      if (!isCommonField(field)) ids.add(field.nodeId);
+    }
+    setCollapsed(ids);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
+  const toggleCollapsed = React.useCallback((nodeId: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
+
+  const hasFilter = filter.trim().length > 0;
+
+  /** 输出比例与批次：从草稿的尺寸/批次输入读，生成中的占位动画按它布局。 */
+  const genSpec = React.useMemo(() => {
+    if (!draft) return { aspect: 1, batch: 1 };
+    let width: number | null = null;
+    let height: number | null = null;
+    let batch = 1;
+    for (const node of Object.values(draft)) {
+      const inputs = node.inputs ?? {};
+      for (const [name, value] of Object.entries(inputs)) {
+        if (typeof value !== "number") continue;
+        if (name === "width" && width === null) width = value;
+        else if (name === "height" && height === null) height = value;
+        else if (name === "batch_size" && value >= 1) batch = Math.floor(value);
+      }
+    }
+    const aspect = width !== null && height !== null && width > 0 && height > 0 ? width / height : 1;
+    return { aspect, batch };
+  }, [draft]);
 
   const setFieldValue = React.useCallback((field: FieldSpec, raw: string | boolean) => {
     setDraft((current) => {
@@ -152,6 +215,17 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       else next.add(key);
       return next;
     });
+  }, []);
+
+  /** 读入文件内容到导入框（拖拽与文件选择共用），仍由用户点「导入」确认。 */
+  const readJsonFile = React.useCallback((file: File) => {
+    setImportError("");
+    void file
+      .text()
+      .then(setImportText)
+      .catch((err: unknown) =>
+        setImportError(`读取文件失败：${err instanceof Error ? err.message : String(err)}`),
+      );
   }, []);
 
   const doImport = React.useCallback(() => {
@@ -230,15 +304,18 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
           ) : null}
           <span style={{ flex: 1 }} />
           <Button onClick={() => void runtime.connect()} disabled={snapshot.probing}>
+            <RefreshIcon size={12} />
             刷新连接
           </Button>
           {snapshot.settings.processMode === "managed" ? (
             hostSnapshot.running ? (
               <Button tone="danger" onClick={() => void host.stop()}>
+                <SquareIcon size={12} />
                 停止服务
               </Button>
             ) : (
               <Button onClick={() => void host.start(runtime)} disabled={hostSnapshot.starting}>
+                <PlayIcon size={12} />
                 {hostSnapshot.starting ? "启动中…" : "启动服务"}
               </Button>
             )
@@ -268,7 +345,18 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
 
       {/* 队列与进度 */}
       {runningCount > 0 || snapshot.progress ? (
-        <div style={{ padding: "8px 10px 0", display: "flex", flexDirection: "column", gap: 6 }}>
+        <div
+          style={{
+            padding: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            border: `1px solid ${border}`,
+            borderRadius: 8,
+            background: bgSecondary,
+            margin: "0 10px 8px",
+          }}
+        >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: FONT_SM, color: textSecondary }}>
               运行中 {snapshot.queue.queue_running.length} · 等待 {snapshot.queue.queue_pending.length}
@@ -278,32 +366,18 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
               中断
             </Button>
           </div>
-          {snapshot.progress ? (
-            <ProgressBar
-              value={progressValue}
-              label={`${Math.round(progressValue * 100)}%${
-                snapshot.progress.node ? ` · 节点 ${snapshot.progress.node}` : ""
-              }`}
-            />
-          ) : null}
-          {snapshot.preview ? (
-            <img
-              src={snapshot.preview}
-              alt="生成预览"
-              style={{ maxHeight: 200, maxWidth: "100%", objectFit: "contain", borderRadius: 6, alignSelf: "flex-start" }}
-            />
-          ) : snapshot.progress ? (
-            // 有进度却没画面：ComfyUI 默认不发采样预览，说明清楚比让用户对着空白猜好
-            <div style={{ fontSize: 11, color: textMuted }}>
-              正在生成（未开启采样预览：ComfyUI 需带 --preview-method 启动，可在设置里配置）
-            </div>
-          ) : null}
+          <GenerationGrid
+            aspect={genSpec.aspect}
+            batch={genSpec.batch}
+            percent={snapshot.progress && snapshot.progress.max > 0 ? progressValue * 100 : null}
+            node={snapshot.progress?.node ?? ""}
+          />
         </div>
       ) : null}
 
       {/* 工作流与参数 */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 10px" }}>
-        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 0" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "0 10px 8px" }}>
           <Select
             value={activeId}
             onChange={setActiveId}
@@ -313,23 +387,46 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 ? [{ value: "", label: "尚无工作流" }]
                 : workflows.map((item) => ({ value: item.id, label: item.name }))
             }
+            style={{ maxWidth: 260 }}
           />
-          <Button onClick={() => setImportOpen((open) => !open)}>{importOpen ? "取消导入" : "导入工作流"}</Button>
+          <Button onClick={() => setImportOpen((open) => !open)}>
+            {importOpen ? "取消导入" : (
+              <>
+                <UploadIcon size={12} />
+                导入工作流
+              </>
+            )}
+          </Button>
+          {draft ? (
+            <span style={{ flex: 1, textAlign: "right", fontSize: 11, color: textMuted }}>
+              {Object.keys(draft).length} 个节点 · {fields.length} 项参数
+            </span>
+          ) : null}
         </div>
 
         {importOpen ? (
           <div
+            onDragOver={(e: { preventDefault(): void }) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e: { preventDefault(): void; dataTransfer: { files?: FileList | null } }) => {
+              e.preventDefault();
+              setDragOver(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file) readJsonFile(file);
+            }}
             style={{
-              border: `1px solid ${border}`,
+              border: `1px solid ${dragOver ? accent : border}`,
               borderRadius: 8,
               padding: 10,
-              marginBottom: 10,
+              margin: "0 10px 10px",
               background: bgSecondary,
             }}
           >
             <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6, marginBottom: 6 }}>
-              在 ComfyUI 里打开工作流，用「工作流 → 导出（API）」得到 JSON 后粘贴到下面。
-              提交的正是这份图，参数表单也由它生成。
+              粘贴 ComfyUI「工作流 → 导出（API）」的 JSON，参数表单由它生成。
             </div>
             <TextArea
               value={importText}
@@ -347,7 +444,11 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
               <Button tone="primary" onClick={doImport} disabled={busy || !importText.trim()}>
                 导入
               </Button>
-              <Button onClick={() => fileInputRef.current?.click()}>从文件读取</Button>
+              <Button onClick={() => fileInputRef.current?.click()}>
+                <FolderIcon size={12} />
+                从文件读取
+              </Button>
+              <span style={{ alignSelf: "center", fontSize: 11, color: textMuted }}>或拖拽 .json 到此处</span>
             </div>
             {/*
               用原生文件选择而不是宿主的系统对话框：对话框只返回路径，而工作流文件通常在仓库外，
@@ -363,63 +464,107 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 const file = e.target.files?.[0];
                 // 清空以便连续选同一个文件也能再次触发 change
                 e.target.value = "";
-                if (!file) return;
-                setImportError("");
-                void file
-                  .text()
-                  .then((text) => {
-                    // 先填进文本框让内容可见可改，仍由用户点导入确认
-                    setImportText(text);
-                  })
-                  .catch((err: unknown) =>
-                    setImportError(`读取文件失败：${err instanceof Error ? err.message : String(err)}`),
-                  );
+                if (file) readJsonFile(file);
               }}
             />
           </div>
         ) : null}
 
         {!draft ? (
-          <Empty hint="导入一个 API 格式工作流后即可调参生成">
-            {workflows.length === 0 ? "还没有工作流" : "工作流读取失败，请重新导入"}
+          <Empty hint="导入工作流后即可调参生成">
+            <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+              <UploadIcon size={22} />
+              {workflows.length === 0 ? "还没有工作流" : "工作流读取失败，请重新导入"}
+            </span>
           </Empty>
         ) : (
           <>
             {countDisabledNodes(draft) > 0 ? (
-              <div style={{ marginBottom: 8 }}>
-                <Notice tone="warn">
-                  工作流里有被禁用/跳过的节点。API 导出通常已剔除，若生成结果异常请回到 ComfyUI 确认。
-                </Notice>
+              <div style={{ margin: "0 10px 8px" }}>
+                <Notice tone="warn">存在被禁用/跳过的节点，结果异常请回 ComfyUI 确认</Notice>
               </div>
             ) : null}
 
-            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
-              <TextInput value={filter} onChange={setFilter} placeholder="筛选参数（如 prompt / seed / 尺寸）" />
+            <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "0 10px 8px" }}>
+              <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+                <span
+                  style={{
+                    position: "absolute",
+                    left: 8,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    display: "inline-flex",
+                    color: textMuted,
+                    pointerEvents: "none",
+                  }}
+                >
+                  <SearchIcon size={12} />
+                </span>
+                <TextInput
+                  value={filter}
+                  onChange={setFilter}
+                  placeholder="筛选参数…"
+                  title="按参数名、节点名或节点类型筛选"
+                  style={{ paddingLeft: 26 }}
+                />
+              </div>
               <Button onClick={() => active && setDraft(structuredClone(active.prompt))}>重置</Button>
             </div>
 
-            {groups.length === 0 ? (
-              <Empty hint="换个关键词，或点「重置」恢复全部参数">没有匹配的参数</Empty>
+            {visibleFields.length === 0 ? (
+              <Empty hint="换个关键词或重置筛选">
+                <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                  <SearchIcon size={22} />
+                  没有匹配的参数
+                </span>
+              </Empty>
             ) : (
-              groups.map(([nodeId, nodeFields]) => (
-                <div key={nodeId} style={{ marginBottom: 10 }}>
-                  <SectionTitle>
-                    {nodeFields[0]?.nodeLabel ?? nodeId} · {nodeFields[0]?.classType ?? ""}
-                  </SectionTitle>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {nodeFields.map((field) => (
-                      <FieldRow
-                        key={fieldKey(field)}
-                        field={field}
-                        value={readField(draft, field)}
-                        seedChecked={seedMode.has(fieldKey(field))}
-                        onToggleSeed={() => toggleSeed(field)}
-                        onChange={(raw) => setFieldValue(field, raw)}
-                      />
+              <>
+                {commonFields.length > 0 ? (
+                  <div style={{ marginBottom: 4 }}>
+                    <SectionTitle>常用参数</SectionTitle>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "0 10px 8px" }}>
+                      {commonFields.map((field) => (
+                        <FieldRow
+                          key={fieldKey(field)}
+                          field={field}
+                          showNode
+                          value={readField(draft, field)}
+                          seedChecked={seedMode.has(fieldKey(field))}
+                          onToggleSeed={() => toggleSeed(field)}
+                          onChange={(raw) => setFieldValue(field, raw)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {nodeGroups.length > 0 ? (
+                  <div style={{ padding: "0 10px" }}>
+                    {nodeGroups.map(([nodeId, nodeFields]) => (
+                      <CollapseCard
+                        key={nodeId}
+                        title={nodeFields[0]?.nodeLabel ?? nodeId}
+                        subtitle={nodeFields[0]?.classType ?? ""}
+                        badge={`${nodeFields.length} 字段`}
+                        open={hasFilter || !collapsed.has(nodeId)}
+                        onToggle={() => toggleCollapsed(nodeId)}
+                      >
+                        {nodeFields.map((field) => (
+                          <FieldRow
+                            key={fieldKey(field)}
+                            field={field}
+                            value={readField(draft, field)}
+                            seedChecked={seedMode.has(fieldKey(field))}
+                            onToggleSeed={() => toggleSeed(field)}
+                            onChange={(raw) => setFieldValue(field, raw)}
+                          />
+                        ))}
+                      </CollapseCard>
                     ))}
                   </div>
-                </div>
-              ))
+                ) : null}
+              </>
             )}
           </>
         )}
@@ -438,9 +583,11 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
         }}
       >
         <Button tone="primary" onClick={doRun} disabled={!draft || busy || snapshot.channel === "offline"}>
+          <PlayIcon size={12} />
           {busy ? "提交中…" : "生成"}
         </Button>
         <Button onClick={() => void runtime.freeMemory()} disabled={snapshot.channel === "offline"}>
+          <ZapIcon size={12} />
           释放显存
         </Button>
         <span style={{ flex: 1 }} />
@@ -457,6 +604,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
           disabled={!active}
           title="复制这份工作流的 API JSON"
         >
+          <CopyIcon size={12} />
           复制 JSON
         </Button>
         <span style={{ fontSize: 11, color: textMuted }}>{snapshot.results.length} 个结果</span>
@@ -466,8 +614,18 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       <div style={{ borderTop: `1px solid ${border}`, background: bgSecondary }}>
         <SectionTitle>结果</SectionTitle>
         {snapshot.results.length === 0 ? (
-          <div style={{ padding: "4px 10px 10px", fontSize: 11, color: textMuted }}>
-            生成完成后，结果会出现在这里。
+          <div
+            style={{
+              padding: "4px 10px 10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11,
+              color: textMuted,
+            }}
+          >
+            <ImageIcon size={14} />
+            生成后，结果会显示在这里
           </div>
         ) : (
           <div
@@ -504,26 +662,44 @@ function FieldRow(props: {
   field: FieldSpec;
   value: unknown;
   seedChecked: boolean;
+  /** 常用参数区需要带上节点名作区分。 */
+  showNode?: boolean;
   onToggleSeed: () => void;
   onChange: (raw: string | boolean) => void;
 }): unknown {
   const { field, value } = props;
   const label = (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-      <span
-        style={{
-          fontSize: 11,
-          color: textSecondary,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-        title={`${field.nodeId}.${field.input}`}
-      >
-        {field.input}
-      </span>
-      {field.isSeed ? (
-        <Checkbox checked={props.seedChecked} onChange={props.onToggleSeed} label="每次随机" title="每次生成时换一个新种子" />
+    <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <span
+          style={{
+            fontSize: 11,
+            color: textSecondary,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={`${field.nodeId}.${field.input}`}
+        >
+          {fieldLabel(field)}
+        </span>
+        {field.isSeed ? (
+          <Checkbox checked={props.seedChecked} onChange={props.onToggleSeed} label="每次随机" title="每次生成时换一个新种子" />
+        ) : null}
+      </div>
+      {props.showNode ? (
+        <span
+          style={{
+            fontSize: 10,
+            color: textMuted,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={field.nodeLabel}
+        >
+          {field.nodeLabel}
+        </span>
       ) : null}
     </div>
   );
@@ -532,9 +708,7 @@ function FieldRow(props: {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <div style={{ width: 180, flexShrink: 0 }}>{label}</div>
-        <span style={{ fontSize: 11, color: textMuted }} title="该输入由工作流中的连线提供">
-          来源：{field.linkFrom}
-        </span>
+        <Chip title="由工作流的连线提供">来源：{field.linkFrom}</Chip>
       </div>
     );
   }
@@ -620,6 +794,24 @@ function ResultThumb(props: {
         onClick={props.onPreview}
         style={{ width: "100%", height: "100%", objectFit: "cover", cursor: "zoom-in", display: "block" }}
       />
+      {item.savedPath ? (
+        <span
+          title={item.savedPath}
+          style={{
+            position: "absolute",
+            top: 4,
+            right: 4,
+            fontSize: 10,
+            lineHeight: 1.6,
+            padding: "0 5px",
+            borderRadius: 4,
+            background: "rgba(0,0,0,0.6)",
+            color: "#fff",
+          }}
+        >
+          已保存 ✓
+        </span>
+      ) : null}
       {isHover ? (
         <div
           style={{
@@ -631,8 +823,8 @@ function ResultThumb(props: {
             background: "rgba(0,0,0,0.55)",
           }}
         >
-          <span style={{ flex: 1, minWidth: 0, fontSize: 10, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.title}>
-            {item.savedPath ? `已保存：${item.savedPath}` : item.title}
+          <span style={{ flex: 1, minWidth: 0, fontSize: 10, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.savedPath ?? item.title}>
+            {item.title}
           </span>
           <button
             type="button"
@@ -688,5 +880,193 @@ function PreviewOverlay(props: { item: ResultImage; url: string; onClose: () => 
         style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 6 }}
       />
     </div>
+  );
+}
+
+/** 生成动画关键帧（随组件的 `<style>` 挂载/卸载，不落样式文件）。 */
+const GEN_ANIMATION_CSS = `
+@keyframes gen-scan {
+  0% { top: -30%; }
+  100% { top: 130%; }
+}
+@keyframes gen-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes gen-breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+`;
+
+/** 占位格尺寸：单张稍大，多张缩成小格；比例取输出图比例。 */
+function genCellSize(aspect: number, count: number): { width: number; height: number } {
+  const clamp = (value: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, value));
+  if (count <= 1) {
+    const height = clamp(260 / aspect, 90, 200);
+    return { width: clamp(height * aspect, 120, 260), height };
+  }
+  const height = clamp(140 / aspect, 56, 120);
+  return { width: clamp(height * aspect, 72, 140), height };
+}
+
+/**
+ * 生成中的占位动画：按输出图比例画圆角矩形，格数随批次（batch_size）展开。
+ * 有进度时按完成度分三态——已生成（✓）、生成中（流光 + 扫描线 + 居中进度）、待生成（呼吸）；
+ * 尚无进度（排队中）时全部以呼吸点示意。
+ */
+function GenerationGrid(props: {
+  aspect: number;
+  batch: number;
+  /** 整批共用的采样进度（0~100），无数据时为 null（排队中）。 */
+  percent: number | null;
+  /** 当前执行节点名。 */
+  node: string;
+}): unknown {
+  const MAX_CELLS = 12;
+  const shown = Math.min(props.batch, MAX_CELLS);
+  const size = genCellSize(props.aspect, shown);
+  const pct = props.percent === null ? null : Math.round(props.percent);
+  const activeIndex = pct === null ? -1 : Math.min(shown - 1, Math.max(0, Math.floor((pct / 100) * shown)));
+  const fontPct = size.height > 120 ? 22 : size.height > 80 ? 16 : 13;
+
+  const renderCell = (index: number): unknown => {
+    const state =
+      pct === null ? "queued" : index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
+    return (
+      <div
+        key={index}
+        style={{
+          position: "relative",
+          width: size.width,
+          height: size.height,
+          maxWidth: "100%",
+          borderRadius: 10,
+          overflow: "hidden",
+          boxSizing: "border-box",
+          border: state === "active" || state === "done" ? `1px solid ${accent}` : `1px solid ${border}`,
+          background:
+            state === "done"
+              ? "color-mix(in srgb, var(--accent) 16%, transparent)"
+              : state === "active"
+                ? "color-mix(in srgb, var(--accent) 6%, transparent)"
+                : bgSecondary,
+        }}
+      >
+        {state === "queued" ? (
+          <span
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              animation: "gen-breathe 1.6s ease-in-out infinite",
+            }}
+          >
+            <span style={{ width: 5, height: 5, borderRadius: 3, background: textMuted }} />
+          </span>
+        ) : null}
+        {state === "done" ? (
+          <span
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: accent,
+              fontSize: Math.max(12, Math.round(fontPct * 0.75)),
+            }}
+          >
+            ✓
+          </span>
+        ) : null}
+        {state === "active" ? (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background:
+                  "linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.09) 50%, transparent 70%)",
+                backgroundSize: "200% 100%",
+                animation: "gen-shimmer 2.4s linear infinite",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                height: 2,
+                top: 0,
+                background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
+                animation: "gen-scan 1.8s ease-in-out infinite",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 2,
+                color: textPrimary,
+              }}
+            >
+              <span style={{ fontSize: fontPct, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                {pct}%
+              </span>
+              {props.node ? (
+                <span
+                  style={{
+                    fontSize: 9,
+                    color: textMuted,
+                    maxWidth: "92%",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  节点 {props.node}
+                </span>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+        {state === "pending" ? (
+          <span
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: textMuted,
+              fontSize: 9,
+            }}
+          >
+            待生成
+          </span>
+        ) : null}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <style>{GEN_ANIMATION_CSS}</style>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
+        {Array.from({ length: shown }, (_, index) => renderCell(index))}
+        {props.batch > MAX_CELLS ? (
+          <span style={{ alignSelf: "center", fontSize: 11, color: textMuted }}>
+            …共 {props.batch} 张
+          </span>
+        ) : null}
+      </div>
+    </>
   );
 }

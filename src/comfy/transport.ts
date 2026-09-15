@@ -89,7 +89,7 @@ export class ComfyTransport {
       this.channel = "offline";
       return {
         channel: "offline",
-        reason: `无法访问 ${this.base}（${describeError(err)}）。请确认 ComfyUI 正在运行，且启动时带上了 --enable-cors-header（否则它不接受来自界面的请求）`,
+        reason: `无法访问 ${this.base}（${describeError(err)}）。请确认服务已运行并开启跨域放行（--enable-cors-header）`,
       };
     }
   }

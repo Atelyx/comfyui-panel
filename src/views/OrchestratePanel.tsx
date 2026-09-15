@@ -47,7 +47,7 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
           hint={
             hostSnapshot.running
               ? "服务已启动，正在等待就绪…"
-              : "启动 ComfyUI 服务后即可在此编排；也可在设置里改为自行管理进程"
+              : "启动服务后即可编排；也可在设置里改为自行管理"
           }
         >
           <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
@@ -77,7 +77,7 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
               flexShrink: 0,
             }}
           >
-            此界面由 ComfyUI 自己提供，插件读不到它的内容；导入工作流请在 ComfyUI 内用「导出（API）」。
+            界面由 ComfyUI 提供；导入工作流请在 ComfyUI 内「导出（API）」
           </div>
         </>
       )}
