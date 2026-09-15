@@ -194,6 +194,56 @@ export function fieldKey(field: FieldSpec): string {
   return `${field.nodeId}.${field.input}`;
 }
 
+/** 常见输入名的中文标签；未收录时退回原始输入名。 */
+const INPUT_LABELS: Record<string, string> = {
+  text: "提示词",
+  positive: "正向提示词",
+  negative: "反向提示词",
+  negative_prompt: "反向提示词",
+  empty_prompt: "提示词",
+  seed: "种子",
+  noise_seed: "种子",
+  steps: "步数",
+  cfg: "CFG",
+  sampler_name: "采样器",
+  scheduler: "调度器",
+  denoise: "降噪",
+  width: "宽度",
+  height: "高度",
+  batch_size: "批次数",
+  ckpt_name: "模型",
+  model_name: "模型",
+  lora_name: "LoRA",
+};
+
+/** 界面标签：优先中文名，原输入名进 title 供对回 ComfyUI。 */
+export function fieldLabel(field: FieldSpec): string {
+  return INPUT_LABELS[field.input] ?? field.input;
+}
+
+/** 置顶的常用输入（提示词/种子/采样/尺寸），其余仍按节点分组。 */
+const COMMON_INPUTS = new Set([
+  "text",
+  "positive",
+  "negative",
+  "negative_prompt",
+  "empty_prompt",
+  "seed",
+  "noise_seed",
+  "steps",
+  "cfg",
+  "sampler_name",
+  "scheduler",
+  "denoise",
+  "width",
+  "height",
+  "batch_size",
+]);
+
+export function isCommonField(field: FieldSpec): boolean {
+  return COMMON_INPUTS.has(field.input);
+}
+
 /** 统计被跳过或禁用的节点（接口格式通常已剔除它们，这里只用于给用户一句提示，不拦截）。 */
 export function countDisabledNodes(prompt: ApiPrompt): number {
   let count = 0;

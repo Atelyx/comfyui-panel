@@ -48,6 +48,111 @@ export function CloseIcon(props: { size?: number }): unknown {
   );
 }
 
+export function PlayIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M6 4l13 8-13 8V4z" />
+    </Svg>
+  );
+}
+
+export function SquareIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+    </Svg>
+  );
+}
+
+export function RefreshIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v5h-5" />
+    </Svg>
+  );
+}
+
+export function UploadIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="M17 8l-5-5-5 5" />
+      <path d="M12 3v12" />
+    </Svg>
+  );
+}
+
+export function FolderIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </Svg>
+  );
+}
+
+export function SaveIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+      <path d="M17 21v-8H7v8" />
+      <path d="M7 3v5h8" />
+    </Svg>
+  );
+}
+
+export function CopyIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </Svg>
+  );
+}
+
+export function SearchIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <circle cx="11" cy="11" r="8" />
+      <path d="M21 21l-4.35-4.35" />
+    </Svg>
+  );
+}
+
+export function ChevronDownIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M6 9l6 6 6-6" />
+    </Svg>
+  );
+}
+
+export function ChevronRightIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M9 6l6 6-6 6" />
+    </Svg>
+  );
+}
+
+export function ImageIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </Svg>
+  );
+}
+
+export function ZapIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+    </Svg>
+  );
+}
+
 /** 面板外壳：铺满可用空间，自身负责滚动。 */
 export function Panel(props: { children: unknown; toolbar?: unknown }): unknown {
   return (
@@ -218,6 +323,138 @@ export function SectionTitle(props: { children: unknown; right?: unknown }): unk
   );
 }
 
+/** 低调小标签：展示状态或来源这类次要信息，不抢输入行的空间。 */
+export function Chip(props: {
+  children: unknown;
+  title?: string;
+  tone?: "default" | "ok" | "warn";
+}): unknown {
+  const color = props.tone === "ok" ? "#3fb950" : props.tone === "warn" ? "#d29922" : textMuted;
+  return (
+    <span
+      title={props.title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        maxWidth: "100%",
+        padding: "1px 6px",
+        borderRadius: 4,
+        border: `1px solid ${border}`,
+        background: bgPrimary,
+        fontSize: 10,
+        lineHeight: 1.7,
+        color,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {props.children}
+    </span>
+  );
+}
+
+/** 可折叠区块：标题栏可点击展开/收起，children 仅在展开时渲染。 */
+export function CollapseCard(props: {
+  title: unknown;
+  subtitle?: unknown;
+  badge?: unknown;
+  open: boolean;
+  onToggle: () => void;
+  children: unknown;
+}): unknown {
+  return (
+    <div
+      style={{
+        border: `1px solid ${border}`,
+        borderRadius: 8,
+        background: bgSecondary,
+        marginBottom: 8,
+        overflow: "hidden",
+      }}
+    >
+      <button
+        type="button"
+        onClick={props.onToggle}
+        title={props.open ? "收起" : "展开"}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+          boxSizing: "border-box",
+          padding: "7px 10px",
+          border: "none",
+          background: "transparent",
+          color: textPrimary,
+          fontSize: FONT_SM,
+          textAlign: "left",
+          cursor: "pointer",
+        }}
+      >
+        {props.open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+        <span
+          style={{
+            flexShrink: 0,
+            maxWidth: "45%",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {props.title}
+        </span>
+        {props.subtitle ? (
+          <span
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: 10,
+              color: textMuted,
+            }}
+          >
+            {props.subtitle}
+          </span>
+        ) : (
+          <span style={{ flex: 1 }} />
+        )}
+        {props.badge ? (
+          <span
+            style={{
+              flexShrink: 0,
+              fontSize: 10,
+              color: textMuted,
+              border: `1px solid ${border}`,
+              borderRadius: 8,
+              padding: "0 6px",
+              lineHeight: "15px",
+            }}
+          >
+            {props.badge}
+          </span>
+        ) : null}
+      </button>
+      {props.open ? (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            padding: "6px 10px 10px",
+            borderTop: `1px solid ${border}`,
+          }}
+        >
+          {props.children}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function Empty(props: { children: unknown; hint?: unknown }): unknown {
   return (
     <div
@@ -250,8 +487,10 @@ export function TextInput(props: {
   max?: number;
   step?: number;
   disabled?: boolean;
+  title?: string;
   style?: Record<string, unknown>;
 }): unknown {
+  const [focused, setFocused] = React.useState(false);
   return (
     <input
       type={props.type ?? "text"}
@@ -261,13 +500,17 @@ export function TextInput(props: {
       max={props.max}
       step={props.step}
       disabled={props.disabled}
+      title={props.title}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
         width: "100%",
         boxSizing: "border-box",
         padding: "5px 8px",
         borderRadius: 6,
-        border: `1px solid ${border}`,
+        border: `1px solid ${focused ? accent : border}`,
+        boxShadow: focused ? `0 0 0 1px ${accent}` : undefined,
         background: bgPrimary,
         color: textPrimary,
         fontSize: FONT_SM,
