@@ -50,8 +50,6 @@ export function buildStartTokens(settings: ComfySettings): string[] {
   const tokens = [python, "main.py", "--port", String(settings.port)];
   // 插件与 ComfyUI 通信的前提，关掉后连不上
   if (settings.autoCors) tokens.push("--enable-cors-header");
-  // 预览默认关闭，不注入参数就收不到生成中画面
-  if (settings.previewMethod !== "none") tokens.push("--preview-method", settings.previewMethod);
   // 整串塞成一个参数会让宿主把它引成一个，多个开关就失效了，故按命令行习惯切分
   return [...tokens, ...splitArgs(settings.extraArgs)];
 }

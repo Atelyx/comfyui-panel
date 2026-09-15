@@ -5,7 +5,7 @@
  */
 import React from "react";
 import type { AtelyxCtx } from "../ctx";
-import { DEFAULT_SETTINGS, saveSettings, type ComfySettings, type PreviewMethod, type ProcessMode } from "../settings";
+import { DEFAULT_SETTINGS, saveSettings, type ComfySettings, type ProcessMode } from "../settings";
 import type { ComfyRuntime } from "../runtime";
 import type { HostController } from "../host/controller";
 import {
@@ -99,10 +99,10 @@ export function SettingsView(props: SettingsProps): unknown {
           </Button>
         }
       >
-        <Field label="地址" hint="ComfyUI 所在主机；本机即 127.0.0.1。">
+        <Field label="地址" hint="本机用 127.0.0.1">
           <TextInput value={settings.host} onChange={(value) => patch({ host: value })} placeholder="127.0.0.1" />
         </Field>
-        <Field label="端口" hint="与启动参数共用同一端口（托管启动时会按此端口传参）。">
+        <Field label="端口" hint="托管启动时按此端口传参">
           <TextInput
             type="number"
             value={String(settings.port)}
@@ -119,16 +119,13 @@ export function SettingsView(props: SettingsProps): unknown {
       </Card>
 
       <Card title="进程">
-        <Field
-          label="接管方式"
-          hint="托管：插件负责启动与停止；外部：进程由你自行管理，插件只检测连接。"
-        >
+        <Field label="接管方式" hint="托管：插件启停进程；外部：只检测连接">
           <Select
             value={settings.processMode}
             onChange={(value) => patch({ processMode: value as ProcessMode })}
             options={[
-              { value: "managed", label: "托管：插件启动与停止 ComfyUI" },
-              { value: "external", label: "外部：只检测，不启停" },
+              { value: "managed", label: "托管（插件启停）" },
+              { value: "external", label: "外部（仅检测）" },
             ]}
           />
         </Field>
@@ -138,7 +135,7 @@ export function SettingsView(props: SettingsProps): unknown {
             <Button onClick={() => void pickDirectory()}>选择</Button>
           </div>
         </Field>
-        <Field label="Python 可执行文件" hint="留空则用「ComfyUI 目录/venv/Scripts/python.exe」。">
+        <Field label="Python 可执行文件" hint="留空用 venv 内 python">
           <div style={{ display: "flex", gap: 6 }}>
             <TextInput value={settings.pythonPath} onChange={(value) => patch({ pythonPath: value })} placeholder="留空使用 venv 内的 python" />
             <Button onClick={() => void pickPython()}>选择</Button>
@@ -151,29 +148,11 @@ export function SettingsView(props: SettingsProps): unknown {
             </Notice>
           </div>
         ) : null}
-        <Field label="附加启动参数" hint="原样追加在启动命令末尾；端口与跨域放行由插件注入。">
+        <Field label="附加启动参数" hint="追加在启动命令末尾；端口与跨域由插件注入">
           <TextInput value={settings.extraArgs} onChange={(value) => patch({ extraArgs: value })} placeholder="例如 --lowvram" />
         </Field>
-        <Field
-          label="跨域放行"
-          hint="开启后托管启动会带 --enable-cors-header。这是插件与 ComfyUI 通信的前提，关掉后插件将无法连接。"
-        >
+        <Field label="跨域放行" hint="插件与 ComfyUI 通信的前提；关闭后将无法连接">
           <Checkbox checked={settings.autoCors} onChange={(checked) => patch({ autoCors: checked })} label="启动时自动开启跨域放行" />
-        </Field>
-        <Field
-          label="生成中预览"
-          hint="ComfyUI 默认不发送采样预览。选一种方式后，托管启动会带上对应参数，生成过程中就能看到画面；选「不预览」则不注入参数（外部启动时需自己加 --preview-method）。"
-        >
-          <Select
-            value={settings.previewMethod}
-            onChange={(value) => patch({ previewMethod: value as PreviewMethod })}
-            options={[
-              { value: "latent2rgb", label: "latent2rgb（最快，推荐）" },
-              { value: "taesd", label: "taesd（更清晰，需额外的 VAE 近似模型）" },
-              { value: "auto", label: "auto（由 ComfyUI 决定）" },
-              { value: "none", label: "不预览" },
-            ]}
-          />
         </Field>
         {settings.processMode === "managed" ? (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -193,20 +172,20 @@ export function SettingsView(props: SettingsProps): unknown {
           </div>
         ) : (
           <div style={{ fontSize: FONT_SM, color: textMuted }}>
-            外部模式下插件不启停进程；启动时请自行带上 --enable-cors-header。
+            外部模式：自行启动并带 --enable-cors-header
           </div>
         )}
       </Card>
 
       <Card title="结果落库">
-        <Field label="落库目录" hint="图片保存进仓库时的子目录；留空则用仓库设置里的附件目录。">
+        <Field label="落库目录" hint="保存到仓库的子目录；留空用附件目录">
           <TextInput
             value={settings.archiveFolder}
             onChange={(value) => patch({ archiveFolder: value })}
             placeholder="留空使用仓库附件目录"
           />
         </Field>
-        <Field label="追加入笔记" hint="保存结果后，把图片以 Markdown 形式追加到当前打开的笔记末尾。">
+        <Field label="追加入笔记" hint="保存后以 Markdown 追加到当前笔记末尾">
           <Checkbox
             checked={settings.appendToNote}
             onChange={(checked) => patch({ appendToNote: checked })}
@@ -237,7 +216,7 @@ export function SettingsView(props: SettingsProps): unknown {
       >
         {workflows.length === 0 ? (
           <div style={{ color: textMuted, lineHeight: 1.6 }}>
-            还没有工作流。在生成面板里点「导入工作流」，粘贴在 ComfyUI 中用「工作流 → 导出（API）」得到的 JSON。
+            还没有工作流；到生成面板导入「导出（API）」的 JSON
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -300,7 +279,7 @@ export function SettingsView(props: SettingsProps): unknown {
       </Card>
 
       <div style={{ color: textMuted, fontSize: 11, lineHeight: 1.6 }}>
-        默认值（恢复出厂设置时参考）：地址 {DEFAULT_SETTINGS.host}、端口 {DEFAULT_SETTINGS.port}。
+        默认：{DEFAULT_SETTINGS.host}:{DEFAULT_SETTINGS.port}
       </div>
     </div>
   );

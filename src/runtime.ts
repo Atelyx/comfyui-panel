@@ -49,8 +49,6 @@ export interface RuntimeSnapshot {
   queue: QueueSnapshot;
   /** 实时进度（长连接推送）。 */
   progress: ProgressPayload | null;
-  /** 生成中预览帧（dataURL）。 */
-  preview: string | null;
   /** 正在执行的任务 id。 */
   runningPromptId: string | null;
   /** 展示后由界面清除。 */
@@ -101,7 +99,6 @@ export class ComfyRuntime {
       systemStats: null,
       queue: EMPTY_QUEUE,
       progress: null,
-      preview: null,
       runningPromptId: null,
       error: "",
       results: [],
@@ -166,7 +163,7 @@ export class ComfyRuntime {
       this.socket.close();
       this.socket = null;
     }
-    this.emit({ progress: null, preview: null, runningPromptId: null });
+    this.emit({ progress: null, runningPromptId: null });
   }
 
   private startPolling(): void {
@@ -181,7 +178,6 @@ export class ComfyRuntime {
     if (this.socket) this.socket.close();
     const handlers: SocketHandlers = {
       onEvent: (type, data) => this.handleSocketEvent(type, data),
-      onPreview: (dataUrl) => this.emit({ preview: dataUrl }),
       onOpen: () => undefined,
       onClose: (retrying) => {
         // 清进度但保留结果：重连后服务端会补推当前节点，进度随之恢复
@@ -212,7 +208,7 @@ export class ComfyRuntime {
       const payload = data as ExecutingPayload;
       // node 为 null 表示本轮结束
       if (payload.node === null) {
-        this.emit({ progress: null, preview: null, runningPromptId: null });
+        this.emit({ progress: null, runningPromptId: null });
         void this.refreshQueue();
         void this.refreshHistory();
       } else {
@@ -225,7 +221,7 @@ export class ComfyRuntime {
       const payload = data as ExecutionErrorPayload;
       const node = payload.node_type ? `节点 ${payload.node_type}` : "执行";
       const message = payload.exception_message ?? "未知错误";
-      this.emit({ error: `${node}出错：${message}`, progress: null, preview: null });
+      this.emit({ error: `${node}出错：${message}`, progress: null });
       void this.refreshHistory();
       return;
     }
@@ -306,7 +302,6 @@ export class ComfyRuntime {
       runningPromptId: promptId,
       error: "",
       progress: null,
-      preview: null,
       results: this.snap.results.map((item) =>
         item.promptId === promptId && item.title !== request.title ? { ...item, title: request.title } : item,
       ),
@@ -317,7 +312,7 @@ export class ComfyRuntime {
 
   async interrupt(): Promise<void> {
     await this.client.interrupt();
-    this.emit({ progress: null, preview: null });
+    this.emit({ progress: null });
     void this.refreshQueue();
   }
 

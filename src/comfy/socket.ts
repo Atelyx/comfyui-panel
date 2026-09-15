@@ -1,43 +1,16 @@
 /**
- * ComfyUI 的 WebSocket 客户端：实时进度、执行状态与生成中预览都只有这条通道有。
+ * ComfyUI 的 WebSocket 客户端：实时进度与执行状态只有这条通道有。
  *
- * 帧格式（三种预览帧的载荷结构不同，解析时不能混）：
- * - 文本帧 `{"type": ..., "data": ...}`；
- * - 二进制帧 = 4 字节大端事件类型 + 载荷；
- * - `PREVIEW_IMAGE`(1) 的载荷是 `4 字节格式码 + 图片字节`；
- *   `PREVIEW_IMAGE_WITH_METADATA`(4) 是 `4 字节元数据长度 + 元数据 JSON + 图片字节`（图片本身不带格式头）。
- *
+ * 帧格式：文本帧 `{"type": ..., "data": ...}`；二进制帧 = 4 字节大端事件类型 + 载荷，
+ * 只消费其中的 `TEXT`(3) 帧（其余为采样预览类帧，插件不展示实时预览，直接忽略）。
  */
 
 /** 二进制帧的事件类型（与 ComfyUI `protocol.BinaryEventTypes` 对齐）。 */
-const BINARY_PREVIEW_IMAGE = 1;
-const BINARY_UNENCODED_PREVIEW_IMAGE = 2;
 const BINARY_TEXT = 3;
-const BINARY_PREVIEW_IMAGE_WITH_METADATA = 4;
-
-/** 预览图格式码 → MIME。 */
-function imageMime(typeCode: number): string {
-  return typeCode === 2 ? "image/png" : "image/jpeg";
-}
-
-/** 从带元数据帧的元数据 JSON 里取 MIME（取不到按 PNG 兜底，它是最常见的预览格式）。 */
-function mimeFromMetadata(json: string): string {
-  try {
-    const parsed = JSON.parse(json) as { image_type?: unknown };
-    if (typeof parsed.image_type === "string" && parsed.image_type.startsWith("image/")) {
-      return parsed.image_type;
-    }
-  } catch {
-    // 元数据不可解析时不影响图片本身
-  }
-  return "image/png";
-}
 
 export interface SocketHandlers {
   /** 文本事件（事件名 + 载荷对象）。 */
   onEvent(type: string, data: unknown): void;
-  /** 生成中的预览帧（dataURL，可直接给 `<img>`）。 */
-  onPreview(dataUrl: string): void;
   /** 连接建立。 */
   onOpen(): void;
   /** 连接关闭（`retrying` 表示插件会自动重连，UI 据此区分「掉了在重连」与「彻底断开」）。 */
@@ -81,11 +54,6 @@ export class ComfySocket {
 
     ws.onopen = () => {
       this.retryIndex = 0;
-      // 声明支持带元数据的预览帧，否则服务端会走旧的 UNENCODED 分支
-      try {
-        ws.send(JSON.stringify({ type: "feature_flags", data: { supports_preview_metadata: true } }));
-      } catch {
-        }
       this.handlers.onOpen();
     };
 
@@ -134,39 +102,10 @@ export class ComfySocket {
     if (bytes.length < 4) return;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const eventType = view.getUint32(0, false);
-    const payload = bytes.subarray(4);
-    if (eventType === BINARY_PREVIEW_IMAGE) {
-      // 载荷 = 4 字节图片格式码 + 图片字节
-      if (payload.length < 4) return;
-      const header = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-      this.emitPreview(payload.subarray(4), imageMime(header.getUint32(0, false)));
-      return;
-    }
-    if (eventType === BINARY_PREVIEW_IMAGE_WITH_METADATA) {
-      // 载荷 = 4 字节元数据长度 + 元数据 JSON + 图片字节（图片字节不带格式头，MIME 在元数据里）
-      if (payload.length < 4) return;
-      const metaView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-      const metaLength = metaView.getUint32(0, false);
-      const imageStart = 4 + metaLength;
-      if (payload.length < imageStart) return;
-      const metaJson = new TextDecoder().decode(payload.subarray(4, imageStart));
-      this.emitPreview(payload.subarray(imageStart), mimeFromMetadata(metaJson));
-      return;
-    }
-    if (eventType === BINARY_UNENCODED_PREVIEW_IMAGE) {
-      // 旧式帧没有格式信息（已声明支持带元数据的版本，正常收不到）；按 JPEG 兜底，浏览器会按内容嗅探
-      this.emitPreview(payload, "image/jpeg");
-      return;
-    }
     if (eventType === BINARY_TEXT) {
-      this.handleText(new TextDecoder().decode(payload));
+      this.handleText(new TextDecoder().decode(bytes.subarray(4)));
     }
-  }
-
-  /** 预览帧 → dataURL。 */
-  private emitPreview(data: Uint8Array, mime: string): void {
-    if (data.length === 0) return;
-    this.handlers.onPreview(`data:${mime};base64,${bytesToBase64(data)}`);
+    // 采样预览类帧（1/2/4）不展示实时预览，直接忽略
   }
 
   /** 主动关闭：与断线后的自动重连相对，调用后连接就此结束。 */
@@ -190,7 +129,7 @@ export class ComfySocket {
   }
 }
 
-/** 分块编码并拼接：预览图可达数百 KB，一次性传参会撑爆调用栈。 */
+/** 分块编码并拼接：结果图可达数 MB，一次性传参会撑爆调用栈。 */
 export function bytesToBase64(bytes: Uint8Array): string {
   const CHUNK = 0x8000;
   let binary = "";

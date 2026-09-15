@@ -9,9 +9,6 @@ import type { AtelyxCtx } from "./ctx";
 /** 托管=插件负责启停；外部=只检测，进程归用户管。 */
 export type ProcessMode = "managed" | "external";
 
-/** 采样预览方式：ComfyUI 默认不发预览，不注入参数就收不到生成中的画面。 */
-export type PreviewMethod = "none" | "auto" | "latent2rgb" | "taesd";
-
 export interface ComfySettings {
   /** ComfyUI 监听地址（默认本机）。 */
   host: string;
@@ -27,8 +24,6 @@ export interface ComfySettings {
   extraArgs: string;
   /** 是否注入跨域放行参数：直连通道的前提，关掉只剩保底通道。 */
   autoCors: boolean;
-  /** 采样预览方式。 */
-  previewMethod: PreviewMethod;
   /** 落库子目录，留空则用仓库的附件目录。 */
   archiveFolder: string;
   /** 落库后是否把图片追加到当前笔记。 */
@@ -51,8 +46,6 @@ export const DEFAULT_SETTINGS: ComfySettings = {
   pythonPath: "",
   extraArgs: "",
   autoCors: true,
-  // 默认开预览：代价是采样时多算一张小图，换来生成中能看见画面
-  previewMethod: "latent2rgb",
   archiveFolder: "",
   appendToNote: false,
 };
@@ -70,7 +63,6 @@ function coerce(raw: unknown): ComfySettings {
   };
   const port = source.port;
   const mode = source.processMode;
-  const preview = source.previewMethod;
   return {
     host: str("host", DEFAULT_SETTINGS.host).trim() || DEFAULT_SETTINGS.host,
     // 非法端口在此挡掉，后面拼地址的地方无需再判
@@ -80,10 +72,6 @@ function coerce(raw: unknown): ComfySettings {
     pythonPath: str("pythonPath", DEFAULT_SETTINGS.pythonPath),
     extraArgs: str("extraArgs", DEFAULT_SETTINGS.extraArgs),
     autoCors: bool("autoCors", DEFAULT_SETTINGS.autoCors),
-    previewMethod:
-      preview === "none" || preview === "auto" || preview === "latent2rgb" || preview === "taesd"
-        ? preview
-        : DEFAULT_SETTINGS.previewMethod,
     archiveFolder: str("archiveFolder", DEFAULT_SETTINGS.archiveFolder),
     appendToNote: bool("appendToNote", DEFAULT_SETTINGS.appendToNote),
   };
