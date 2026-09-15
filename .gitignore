@@ -1,0 +1,18 @@
+# 依赖与构建产物
+
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 宿主在安装/更新时生成的自包含产物（入口拆成多文件，见 package.json 的 atelyx.bundle）
+.atelyx-dist/
+
+# 插件运行时数据（本地目录安装时写在插件目录内，属本机数据不进仓库）
+data/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,2 @@
+# 行尾规范：仓库统一存 LF，检出强制 LF（上 GitHub 零噪音）
+* text=auto eol=lf
