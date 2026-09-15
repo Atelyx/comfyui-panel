@@ -40,7 +40,6 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
           <Button onClick={() => { setLoaded(false); setReloadKey((key) => key + 1); }} disabled={offline}>
             刷新
           </Button>
-          <Button onClick={() => void host.openExternal(target)}>在浏览器打开</Button>
           <Button onClick={onOpenGenerate}>返回生成</Button>
         </Toolbar>
       }

@@ -135,6 +135,13 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   }
 
   pluginCtx.effect(() => {
+    // 关窗兜底：应用退出时宿主不结束插件进程（它只保证停用/卸载时收尾），而子进程不会随
+    // 父进程消失，留下的是占着端口与显存的孤儿。宿主侧若改为进程随应用退出（如 Windows
+    // Job Object）即可移除本段——那时它是多余的。
+    const onHide = (): void => deps?.host.killOnShutdown();
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("beforeunload", onHide);
+
     const offPanel = pluginCtx.slots.registerView({
       kind: VIEW_KIND,
       label: "ComfyUI",
@@ -151,6 +158,8 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       component: ComfySettings,
     });
     return () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("beforeunload", onHide);
       offPanel();
       offOrchestrate();
       offSetting();

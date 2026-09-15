@@ -246,7 +246,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             )
           ) : null}
           <Button onClick={onOpenOrchestrate}>编排界面</Button>
-          <Button onClick={() => void host.openExternal(runtime.baseUrlForUI)}>浏览器打开</Button>
         </Toolbar>
       }
     >

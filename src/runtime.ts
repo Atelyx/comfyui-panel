@@ -358,7 +358,7 @@ export class ComfyRuntime {
     if (this.snap.error) this.emit({ error: "" });
   }
 
-  /** ComfyUI 的基址（面板上的「浏览器打开」等动作需要）。 */
+  /** ComfyUI 的基址（编排面板用它作内嵌地址）。 */
   get baseUrlForUI(): string {
     return this.transport.baseUrl;
   }

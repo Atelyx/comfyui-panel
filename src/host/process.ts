@@ -134,14 +134,3 @@ export async function startComfy(
     error: (message) => options.onError(message),
   });
 }
-
-/** 用系统默认程序打开 URL 或路径（插件上下文没有「打开」方法，只能经命令表达）。 */
-export async function openPath(ctx: AtelyxCtx, platform: Platform, target: string): Promise<void> {
-  const command = platform === "windows" ? "cmd.exe" : "sh";
-  // `start` 的第一个引号参数会被当成窗口标题，故用一个空参数占位；目标单独一项传给宿主加引号
-  const args =
-    platform === "windows"
-      ? ["/C", "start", "", target]
-      : ["-c", 'open "$1" || xdg-open "$1"', "sh", target];
-  await ctx.shell.exec({ command, args });
-}

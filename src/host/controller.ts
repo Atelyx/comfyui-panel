@@ -7,7 +7,7 @@
 import type { AtelyxCtx, ShellProcessHandle } from "../ctx";
 import type { ComfySettings } from "../settings";
 import type { ComfyRuntime } from "../runtime";
-import { describeStartCommand, openPath, resolvePlatform, startComfy, type Platform } from "./process";
+import { describeStartCommand, resolvePlatform, startComfy, type Platform } from "./process";
 
 export interface HostSnapshot {
   /** 是否由本插件启动。 */
@@ -158,15 +158,21 @@ export class HostController {
     }
   }
 
-  /** 在系统浏览器中打开地址（内嵌不可用时的降级出口）。 */
-  async openExternal(target: string): Promise<void> {
-    try {
-      await openPath(this.ctx, await this.getPlatform(), target);
-    } catch (err) {
-      this.emit({ error: describe(err) });
-    }
+  /**
+   * 关窗前的尽力而为清理：不等待结果，立刻发起结束。
+   *
+   * 应用退出时宿主不清理插件进程（它只保证停用/卸载时收尾），而子进程不会随父进程消失，
+   * 留下的是占着端口与显存的孤儿。这里在页面销毁前把结束命令发出去——命令一旦到达宿主就会
+   * 执行，不等 Promise 是因为页面随即被销毁，等也等不到。
+   */
+  killOnShutdown(): void {
+    const handle = this.handle;
+    if (!handle) return;
+    this.handle = null;
+    void handle.cancel().catch(() => {
+      // 页面正在销毁，无处提示；宿主侧的登记也会随进程退出自然清理
+    });
   }
-
 }
 
 function describe(err: unknown): string {

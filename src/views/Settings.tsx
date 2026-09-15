@@ -65,7 +65,9 @@ export function SettingsView(props: SettingsProps): unknown {
   const pickPython = React.useCallback(async () => {
     setDialogError("");
     try {
-      const file = await ctx.dialog.pickFile([{ name: "Python 可执行文件", extensions: ["exe", ""] }]);
+      // 不设扩展名过滤：Python 可能是 python.exe、conda 环境里的可执行文件或 Unix 下的无扩展名二进制；
+      // 过滤器要求每项为非空字符串，塞空串会被宿主判为非法参数而直接抛错（对话框根本不会弹）
+      const file = await ctx.dialog.pickFile();
       if (file) patch({ pythonPath: file });
     } catch (err) {
       setDialogError(err instanceof Error ? err.message : String(err));
@@ -86,13 +88,6 @@ export function SettingsView(props: SettingsProps): unknown {
       {snapshot.channelReason ? (
         <div style={{ marginBottom: 12 }}>
           <Notice tone={snapshot.channel === "offline" ? "error" : "warn"}>{snapshot.channelReason}</Notice>
-        </div>
-      ) : null}
-      {dialogError ? (
-        <div style={{ marginBottom: 12 }}>
-          <Notice tone="error" onClose={() => setDialogError("")}>
-            {dialogError}
-          </Notice>
         </div>
       ) : null}
 
@@ -149,6 +144,13 @@ export function SettingsView(props: SettingsProps): unknown {
             <Button onClick={() => void pickPython()}>选择</Button>
           </div>
         </Field>
+        {dialogError ? (
+          <div style={{ marginBottom: 12 }}>
+            <Notice tone="error" onClose={() => setDialogError("")}>
+              {dialogError}
+            </Notice>
+          </div>
+        ) : null}
         <Field label="附加启动参数" hint="原样追加在启动命令末尾；端口与跨域放行由插件注入。">
           <TextInput value={settings.extraArgs} onChange={(value) => patch({ extraArgs: value })} placeholder="例如 --lowvram" />
         </Field>

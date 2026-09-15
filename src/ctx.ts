@@ -8,7 +8,7 @@ import type { Context } from "@atelyx/cordis";
  * 依赖声明见 `index.tsx`——这里用到的平台服务在插件运行时恒在。
  */
 
-/** 流式进程回调（`ctx.shell.exec`/`spawn` 传 handlers 时启用）。 */
+/** 进程输出回调（`ctx.shell.spawn` 传 handlers 时启用）。 */
 export interface ShellStreamHandlers {
   chunk(data: { stream: "stdout" | "stderr"; data: string }): void;
   end(data: { code: number | null }): void;
@@ -72,10 +72,6 @@ export interface AtelyxCtx extends Context {
     clear(): Promise<void>;
   };
   shell: {
-    exec(
-      opts: { command: string; args?: string[]; cwd?: string; env?: Record<string, string> },
-      handlers?: ShellStreamHandlers,
-    ): Promise<{ code: number | null; stdout: string; stderr: string } | undefined>;
     /** 启动长驻进程并立即拿到句柄（不等进程结束）。 */
     spawn(
       opts: { command: string; args?: string[]; cwd?: string; env?: Record<string, string> },
