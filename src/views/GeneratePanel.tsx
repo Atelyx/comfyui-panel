@@ -55,12 +55,10 @@ interface GeneratePanelProps {
   ctx: AtelyxCtx;
   runtime: ComfyRuntime;
   host: HostController;
-  /** 由入口传入的切换回调。 */
-  onOpenOrchestrate(): void;
 }
 
 export function GeneratePanel(props: GeneratePanelProps): unknown {
-  const { ctx, runtime, host, onOpenOrchestrate } = props;
+  const { ctx, runtime, host } = props;
   const snapshot = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot);
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
 
@@ -245,7 +243,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
               </Button>
             )
           ) : null}
-          <Button onClick={onOpenOrchestrate}>编排界面</Button>
         </Toolbar>
       }
     >

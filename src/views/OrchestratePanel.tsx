@@ -15,11 +15,10 @@ import { Button, Empty, Panel, Toolbar, StatusDot, border, bgSecondary, textMute
 interface OrchestrateProps {
   runtime: ComfyRuntime;
   host: HostController;
-  onOpenGenerate(): void;
 }
 
 export function OrchestratePanel(props: OrchestrateProps): unknown {
-  const { runtime, host, onOpenGenerate } = props;
+  const { runtime, host } = props;
   const snapshot = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot);
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
   const [reloadKey, setReloadKey] = React.useState(0);
@@ -40,7 +39,6 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
           <Button onClick={() => { setLoaded(false); setReloadKey((key) => key + 1); }} disabled={offline}>
             刷新
           </Button>
-          <Button onClick={onOpenGenerate}>返回生成</Button>
         </Toolbar>
       }
     >

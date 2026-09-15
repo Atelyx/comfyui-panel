@@ -169,7 +169,7 @@ export class ComfySocket {
     this.handlers.onPreview(`data:${mime};base64,${bytesToBase64(data)}`);
   }
 
-  /** 主动关闭（不再重连）。 */
+  /** 主动关闭：与断线后的自动重连相对，调用后连接就此结束。 */
   close(): void {
     this.closedByUs = true;
     if (this.retryTimer !== null) {

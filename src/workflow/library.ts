@@ -103,7 +103,7 @@ async function readIndex(ctx: AtelyxCtx): Promise<WorkflowSummary[]> {
   try {
     const raw = await ctx.storage.get(INDEX_KEY);
     if (!Array.isArray(raw)) return [];
-    // 索引虽由本插件写入，仍收敛一次形状（手改或旧版本可能留下脏项）
+    // 索引虽由本插件写入，仍收敛一次形状（手改可能留下脏项）
     return raw.flatMap((item): WorkflowSummary[] => {
       if (!item || typeof item !== "object") return [];
       const row = item as Record<string, unknown>;

@@ -76,19 +76,8 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       });
     });
 
-/** 内部分「生成」与「编排」两个标签。 */
-  function ComfyPanel(props: { initial: "generate" | "orchestrate" }): unknown {
-    const ready = React.useSyncExternalStore(subscribe, getDeps);
-    const [mode, setMode] = React.useState<"generate" | "orchestrate">(props.initial);
-
-    if (!ready) {
-      return (
-        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, fontSize: FONT_SM }}>
-          正在初始化…
-        </div>
-      );
-    }
-
+  /** 面板外壳：铺满可用空间并自持布局。生成与编排各自是独立视图，切换交给宿主的面板标签。 */
+  function PanelShell(props: { children: unknown }): unknown {
     return (
       <div
         style={{
@@ -101,21 +90,36 @@ export default function apply(pluginCtx: AtelyxCtx): void {
           background: bgSecondary,
         }}
       >
-        {mode === "generate" ? (
-          <GeneratePanel
-            ctx={ready.ctx}
-            runtime={ready.runtime}
-            host={ready.host}
-            onOpenOrchestrate={() => setMode("orchestrate")}
-          />
-        ) : (
-          <OrchestratePanel
-            runtime={ready.runtime}
-            host={ready.host}
-            onOpenGenerate={() => setMode("generate")}
-          />
-        )}
+        {props.children}
       </div>
+    );
+  }
+
+  function InitPlaceholder(): unknown {
+    return (
+      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, fontSize: FONT_SM }}>
+        正在初始化…
+      </div>
+    );
+  }
+
+  function GenerateView(): unknown {
+    const ready = React.useSyncExternalStore(subscribe, getDeps);
+    if (!ready) return <InitPlaceholder />;
+    return (
+      <PanelShell>
+        <GeneratePanel ctx={ready.ctx} runtime={ready.runtime} host={ready.host} />
+      </PanelShell>
+    );
+  }
+
+  function OrchestrateView(): unknown {
+    const ready = React.useSyncExternalStore(subscribe, getDeps);
+    if (!ready) return <InitPlaceholder />;
+    return (
+      <PanelShell>
+        <OrchestratePanel runtime={ready.runtime} host={ready.host} />
+      </PanelShell>
     );
   }
 
@@ -135,9 +139,8 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   }
 
   pluginCtx.effect(() => {
-    // 关窗兜底：应用退出时宿主不结束插件进程（它只保证停用/卸载时收尾），而子进程不会随
-    // 父进程消失，留下的是占着端口与显存的孤儿。宿主侧若改为进程随应用退出（如 Windows
-    // Job Object）即可移除本段——那时它是多余的。
+    // 关窗兜底：宿主只在停用/卸载时收尾插件进程，应用退出时不清理，而子进程不会随父进程
+    // 消失——留下的是占着端口与显存的孤儿。
     const onHide = (): void => deps?.host.killOnShutdown();
     window.addEventListener("pagehide", onHide);
     window.addEventListener("beforeunload", onHide);
@@ -145,12 +148,12 @@ export default function apply(pluginCtx: AtelyxCtx): void {
     const offPanel = pluginCtx.slots.registerView({
       kind: VIEW_KIND,
       label: "ComfyUI",
-      component: () => <ComfyPanel initial="generate" />,
+      component: GenerateView,
     });
     const offOrchestrate = pluginCtx.slots.registerView({
       kind: `${VIEW_KIND}.orchestrate`,
       label: "ComfyUI 编排",
-      component: () => <ComfyPanel initial="orchestrate" />,
+      component: OrchestrateView,
     });
     const offSetting = pluginCtx.slots.registerSetting({
       key: SETTING_KEY,
