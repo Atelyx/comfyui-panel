@@ -3,7 +3,7 @@ import type { Context } from "@atelyx/cordis";
 /**
  * 插件上下文（`ctx`）的最小可用类型面。
  *
- * 只声明本插件实际用到的服务与方法；宿主在加载时按自己的实现注入，
+ * 只声明本插件实际用到的服务与方法；Atelyx在加载时按自己的实现注入，
  * 这里的类型仅为本地 `tsc --noEmit` 提供约束。
  * 依赖声明见 `index.tsx`——这里用到的平台服务在插件运行时恒在。
  */
@@ -55,7 +55,7 @@ export interface RegisterCommandOptions {
 }
 
 export interface AtelyxCtx extends Context {
-  /** 宿主信息（平台用于决定启动命令的写法）。 */
+  /** Atelyx 平台信息（平台用于决定启动命令的写法）。 */
   app: {
     version(): Promise<string>;
     platform(): Promise<string>;

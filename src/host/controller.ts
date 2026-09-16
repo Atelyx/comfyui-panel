@@ -40,7 +40,7 @@ export class HostController {
   private settings: ComfySettings;
   private readonly listeners = new Set<() => void>();
   private snap: HostSnapshot = EMPTY;
-  /** 首次用到时向宿主问一次并缓存。 */
+  /** 首次用到时向Atelyx问一次并缓存。 */
   private platform: Platform | null = null;
   /** 本插件启动的进程句柄；停止与「是否在运行」都依它判断。 */
   private handle: ShellProcessHandle | null = null;
@@ -156,19 +156,6 @@ export class HostController {
       this.handle = null;
       this.emit({ running: false, starting: false });
     }
-  }
-
-  /**
-   * 关窗前的尽力而为清理：页面销毁在即，异步等不到返回，只把结束命令发出去
-   * （命令一旦到达宿主就会执行）。宿主侧另有进程收尾，这里是销毁路径上的双保险。
-   */
-  killOnShutdown(): void {
-    const handle = this.handle;
-    if (!handle) return;
-    this.handle = null;
-    void handle.cancel().catch(() => {
-      // 页面正在销毁，无处提示；宿主侧的登记也会随进程退出自然清理
-    });
   }
 }
 

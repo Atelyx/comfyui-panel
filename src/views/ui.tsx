@@ -1,7 +1,7 @@
 /**
  * 界面原语：面板共用的样式与小组件。
  *
- * 样式只用内联 style + 宿主的 CSS 变量，不依赖 Tailwind（插件没有构建期的类名提取，
+ * 样式只用内联 style + Atelyx的 CSS 变量，不依赖 Tailwind（插件没有构建期的类名提取，
  * Tailwind 类不会生效）；颜色走变量而非硬编码，才能跟随用户主题变化。
  */
 import React from "react";

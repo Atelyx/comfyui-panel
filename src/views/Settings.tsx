@@ -66,7 +66,7 @@ export function SettingsView(props: SettingsProps): unknown {
     setDialogError("");
     try {
       // 不设扩展名过滤：Python 可能是 python.exe、conda 环境里的可执行文件或 Unix 下的无扩展名二进制；
-      // 过滤器要求每项为非空字符串，塞空串会被宿主判为非法参数而直接抛错（对话框根本不会弹）
+      // 过滤器要求每项为非空字符串，塞空串会被Atelyx判为非法参数而直接抛错（对话框根本不会弹）
       const file = await ctx.dialog.pickFile();
       if (file) patch({ pythonPath: file });
     } catch (err) {

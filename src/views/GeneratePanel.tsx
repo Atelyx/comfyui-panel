@@ -450,7 +450,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
               <span style={{ alignSelf: "center", fontSize: 11, color: textMuted }}>或拖拽 .json 到此处</span>
             </div>
             {/*
-              用原生文件选择而不是宿主的系统对话框：对话框只返回路径，而工作流文件通常在仓库外，
+              用原生文件选择而不是Atelyx的系统对话框：对话框只返回路径，而工作流文件通常在仓库外，
               插件的读取通道只服务仓库内相对路径（绝对路径会被拒），拿不到内容。
               原生选择直接给出文件本体，读内容即可，与文件放在哪里无关。
             */}

@@ -2,7 +2,7 @@
  * 结果落库：把生成的图片存进当前仓库，可选追加到当前笔记。
  *
  * 为什么分「写临时件 → 导入附件」两步：插件的文件写入只收文本，没有二进制通道；
- * 而附件导入是宿主既有能力（附件目录、重名规则、引用语义都由它保持一致），复用比自造落位规则稳。
+ * 而附件导入是Atelyx既有能力（附件目录、重名规则、引用语义都由它保持一致），复用比自造落位规则稳。
  * 两步都经原始命令逃生舱调用，因为附件能力未被封装成常规服务。
  *
  * 落库后固定清理临时件：临时区随仓库同步，留下等于撑大用户的同步盘。
@@ -11,7 +11,7 @@ import type { AtelyxCtx } from "../ctx";
 import { bytesToBase64 } from "../comfy/socket";
 import type { ImageRef } from "../comfy/types";
 
-/** 临时区归组键（宿主据此派生定长目录名，无路径语义）。 */
+/** 临时区归组键（Atelyx据此派生定长目录名，无路径语义）。 */
 const TEMP_GROUP = "comfyui";
 
 export interface ArchiveResult {
@@ -43,7 +43,7 @@ export async function archiveImage(
   const fileName = archiveName(ref);
   const base64Data = bytesToBase64(bytes);
 
-  // 写入仓库内的临时区（路径边界由宿主校验）
+  // 写入仓库内的临时区（路径边界由Atelyx校验）
   const tempRef = (await ctx.native.invoke("write_temp_attachment", {
     canvasId: TEMP_GROUP,
     fileName,

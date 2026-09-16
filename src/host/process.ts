@@ -11,7 +11,7 @@ import type { AtelyxCtx, ShellProcessHandle } from "../ctx";
 import type { ComfySettings } from "../settings";
 import { resolvePython } from "../settings";
 
-/** 平台决定命令写法，判错就启不动，因此取宿主给的值而不是猜 UA。 */
+/** 平台决定命令写法，判错就启不动，因此取Atelyx给的值而不是猜 UA。 */
 export type Platform = "windows" | "unix";
 
 /** 命令写法只有这两种。 */
@@ -40,9 +40,9 @@ export interface StartOptions {
 /**
  * 启动参数：逐项分开。
  *
- * 不把整行命令（含引号）拼成一个参数——宿主逐项交给进程时，参数内部的引号会被转义成
+ * 不把整行命令（含引号）拼成一个参数——Atelyx逐项交给进程时，参数内部的引号会被转义成
  * `\"`，而 `cmd.exe` 不认这种转义（它只认 `""` 双写），命令会被拆坏。
- * 逐项传参由宿主按需加引号，cmd 能正确解析。
+ * 逐项传参由Atelyx按需加引号，cmd 能正确解析。
  */
 export function buildStartTokens(settings: ComfySettings): string[] {
   const python = resolvePython(settings);
@@ -50,7 +50,7 @@ export function buildStartTokens(settings: ComfySettings): string[] {
   const tokens = [python, "main.py", "--port", String(settings.port)];
   // 插件与 ComfyUI 通信的前提，关掉后连不上
   if (settings.autoCors) tokens.push("--enable-cors-header");
-  // 整串塞成一个参数会让宿主把它引成一个，多个开关就失效了，故按命令行习惯切分
+  // 整串塞成一个参数会让Atelyx把它引成一个，多个开关就失效了，故按命令行习惯切分
   return [...tokens, ...splitArgs(settings.extraArgs)];
 }
 
@@ -58,7 +58,7 @@ export function buildStartTokens(settings: ComfySettings): string[] {
  * 按命令行习惯切分用户填写的附加参数：空白分隔，双引号内保留空白并去掉引号。
  *
  * 不能简单地按空白切：参数值常是路径，形如 `--extra-model-paths-config "E:/my models/x.yaml"`，
- * 切开会把它拆成三段，引号还会被宿主转义成字面量，最终传给服务端的是错的路径。
+ * 切开会把它拆成三段，引号还会被Atelyx转义成字面量，最终传给服务端的是错的路径。
  */
 function splitArgs(text: string): string[] {
   const out: string[] = [];
@@ -96,7 +96,7 @@ function shellQuote(value: string): string {
 
 /** 按平台组装执行参数。 */
 function runArgs(platform: Platform, tokens: string[]): string[] {
-  // Windows：`/C` 之后逐项给，引号交给宿主按需添加
+  // Windows：`/C` 之后逐项给，引号交给Atelyx按需添加
   if (platform === "windows") return ["/C", ...tokens];
   // Unix：`-c` 只吃一个脚本文本，在这里拼成命令行
   return ["-c", tokens.map(shellQuote).join(" ")];
@@ -105,7 +105,7 @@ function runArgs(platform: Platform, tokens: string[]): string[] {
 /**
  * 启动 ComfyUI 并返回句柄。
  *
- * 句柄须由调用方保存：ComfyUI 是长驻服务，只能靠它停下。宿主在插件停用/卸载时也会统一
+ * 句柄须由调用方保存：ComfyUI 是长驻服务，只能靠它停下。Atelyx在插件停用/卸载时也会统一
  * 结束本插件启动的进程，因此不必自己兜底崩溃场景。
  */
 export async function startComfy(

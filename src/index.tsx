@@ -76,7 +76,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       });
     });
 
-  /** 面板外壳：铺满可用空间并自持布局。生成与编排各自是独立视图，切换交给宿主的面板标签。 */
+  /** 面板外壳：铺满可用空间并自持布局。生成与编排各自是独立视图，切换交给Atelyx的面板标签。 */
   function PanelShell(props: { children: unknown }): unknown {
     return (
       <div
@@ -139,11 +139,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   }
 
   pluginCtx.effect(() => {
-    // 关窗兜底：销毁前发出结束命令（到达宿主即执行），防孤儿进程占端口与显存
-    const onHide = (): void => deps?.host.killOnShutdown();
-    window.addEventListener("pagehide", onHide);
-    window.addEventListener("beforeunload", onHide);
-
+    // 进程收尾由 Atelyx 统一负责（插件停用/卸载/应用退出都会结束本插件启动的进程树）
     const offPanel = pluginCtx.slots.registerView({
       kind: VIEW_KIND,
       label: "ComfyUI",
@@ -160,8 +156,6 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       component: ComfySettings,
     });
     return () => {
-      window.removeEventListener("pagehide", onHide);
-      window.removeEventListener("beforeunload", onHide);
       offPanel();
       offOrchestrate();
       offSetting();
