@@ -42,7 +42,6 @@ export interface ResultImage {
 export interface RuntimeSnapshot {
   settings: ComfySettings;
   channel: Channel;
-  channelReason: string;
   /** 首屏与手动重连时为 true。 */
   probing: boolean;
   systemStats: SystemStats | null;
@@ -94,7 +93,6 @@ export class ComfyRuntime {
     this.snap = {
       settings,
       channel: "offline",
-      channelReason: "",
       probing: false,
       systemStats: null,
       queue: EMPTY_QUEUE,
@@ -134,7 +132,7 @@ export class ComfyRuntime {
   async connect(): Promise<void> {
     this.emit({ probing: true, error: "" });
     const state = await this.transport.probe();
-    this.emit({ channel: state.channel, channelReason: state.reason, probing: false });
+    this.emit({ channel: state.channel, probing: false });
     if (state.channel === "offline") {
       this.teardownConnection();
       return;
@@ -192,7 +190,7 @@ export class ComfyRuntime {
   /** 长连接彻底断开时确认服务是否还在。 */
   private async probeChannelOnly(): Promise<void> {
     const state = await this.transport.probe();
-    this.emit({ channel: state.channel, channelReason: state.reason });
+    this.emit({ channel: state.channel });
   }
 
   private handleSocketEvent(type: string, data: unknown): void {

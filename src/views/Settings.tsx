@@ -85,12 +85,6 @@ export function SettingsView(props: SettingsProps): unknown {
         boxSizing: "border-box",
       }}
     >
-      {snapshot.channelReason ? (
-        <div style={{ marginBottom: 12 }}>
-          <Notice tone={snapshot.channel === "offline" ? "error" : "warn"}>{snapshot.channelReason}</Notice>
-        </div>
-      ) : null}
-
       <Card
         title="连接"
         actions={

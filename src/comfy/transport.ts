@@ -12,8 +12,6 @@ export type Channel = "direct" | "offline";
 
 export interface ChannelState {
   channel: Channel;
-  /** 探测失败原因：界面据此给出可操作提示。 */
-  reason: string;
 }
 
 export interface RequestOptions {
@@ -33,15 +31,6 @@ const REQUEST_TIMEOUT_MS = 4000;
 
 /** 二进制请求超时：结果图可达数 MB，给足传输时间。 */
 const BINARY_TIMEOUT_MS = 20000;
-
-/** 把底层异常压成一句人话。 */
-function describeError(err: unknown): string {
-  if (err instanceof Error) {
-    if (err.name === "AbortError") return "请求超时";
-    return err.message || err.name;
-  }
-  return String(err);
-}
 
 export class ComfyTransport {
   private readonly base: string;
@@ -70,27 +59,19 @@ export class ComfyTransport {
     }
   }
 
-  /**
-   * 探测服务是否可用。
-   *
-   * 失败原因统一按「未开启跨域放行」表述：界面发出的请求被拒绝时，浏览器只给一个语焉不详的
-   * 网络错误（拿不到响应体），而实际原因几乎总是这一条。
-   */
+  /** 探测服务是否可用。 */
   async probe(): Promise<ChannelState> {
     try {
       const res = await this.fetchWithTimeout(`${this.base}/system_stats`, { method: "GET" }, REQUEST_TIMEOUT_MS);
       if (res.ok) {
         this.channel = "direct";
-        return { channel: "direct", reason: "" };
+        return { channel: "direct" };
       }
       this.channel = "offline";
-      return { channel: "offline", reason: `ComfyUI 返回 HTTP ${res.status}` };
-    } catch (err) {
+      return { channel: "offline" };
+    } catch {
       this.channel = "offline";
-      return {
-        channel: "offline",
-        reason: `无法访问 ${this.base}（${describeError(err)}）。请确认服务已运行并开启跨域放行（--enable-cors-header）`,
-      };
+      return { channel: "offline" };
     }
   }
 

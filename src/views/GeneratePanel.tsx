@@ -302,7 +302,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             label={
               snapshot.channel === "direct" ? "已连接" : snapshot.probing ? "连接中…" : "未连接"
             }
-            title={snapshot.channelReason || undefined}
           />
           {snapshot.systemStats?.devices?.[0]?.name ? (
             <span style={{ fontSize: 11, color: textMuted }}>{snapshot.systemStats.devices[0].name}</span>
@@ -328,11 +327,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
         </Toolbar>
       }
     >
-      {snapshot.channelReason ? (
-        <div style={{ padding: "8px 10px 0" }}>
-          <Notice tone={snapshot.channel === "offline" ? "error" : "warn"}>{snapshot.channelReason}</Notice>
-        </div>
-      ) : null}
       {actionError ? (
         <div style={{ padding: "8px 10px 0" }}>
           <Notice tone="error" onClose={() => setActionError("")}>
