@@ -20,6 +20,14 @@ export const danger = "#e5534b";
 export const FONT_SM = 12;
 export const FONT_MD = 13;
 
+/** 滚动区类名与显式可见的滚动条样式：宿主主题可能隐藏滚动条，滚动区需要自带。 */
+export const SCROLL_LIST_CLASS = "cf-scroll-list";
+export const SCROLLBAR_CSS = `
+.cf-scroll-list::-webkit-scrollbar { width: 10px; height: 10px; }
+.cf-scroll-list::-webkit-scrollbar-track { background: transparent; }
+.cf-scroll-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+`;
+
 /** 图标基座（lucide 的 24×24 线性风格）；不引图标库，图标即几条 path。 */
 function Svg(props: { size?: number; children?: unknown }): unknown {
   return (
@@ -514,18 +522,34 @@ export function TextInput(props: {
   );
 }
 
-export function TextArea(props: {
+/** 自适应高度文本域：内容变化时在 min/max 高度间自动伸缩；到顶后内部滚动，不可手动调整大小。 */
+export function AutoTextArea(props: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
-  rows?: number;
-  mono?: boolean;
+  disabled?: boolean;
+  minHeight?: number;
+  maxHeight?: number;
+  style?: Record<string, unknown>;
 }): unknown {
+  const ref = React.useRef<HTMLTextAreaElement | null>(null);
+  const fit = React.useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const min = props.minHeight ?? 48;
+    const max = props.maxHeight ?? 200;
+    el.style.height = "0px";
+    el.style.height = `${Math.max(min, Math.min(max, el.scrollHeight))}px`;
+    el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
+  }, [props.minHeight, props.maxHeight]);
+  React.useEffect(fit, [fit, props.value]);
   return (
     <textarea
+      ref={ref}
       value={props.value}
       placeholder={props.placeholder}
-      rows={props.rows ?? 3}
+      disabled={props.disabled}
+      rows={1}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
         width: "100%",
@@ -533,13 +557,51 @@ export function TextArea(props: {
         padding: "6px 8px",
         borderRadius: 6,
         border: `1px solid ${border}`,
-        background: bgPrimary,
+        background: props.disabled ? "transparent" : bgPrimary,
+        color: textPrimary,
+        fontSize: FONT_SM,
+        fontFamily: "inherit",
+        lineHeight: 1.5,
+        outline: "none",
+        opacity: props.disabled ? 0.6 : 1,
+        resize: "none",
+        ...(props.style ?? {}),
+      }}
+    />
+  );
+}
+
+export function TextArea(props: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  rows?: number;
+  mono?: boolean;
+  disabled?: boolean;
+  style?: Record<string, unknown>;
+}): unknown {
+  return (
+    <textarea
+      value={props.value}
+      placeholder={props.placeholder}
+      rows={props.rows ?? 3}
+      disabled={props.disabled}
+      onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
+      style={{
+        width: "100%",
+        boxSizing: "border-box",
+        padding: "6px 8px",
+        borderRadius: 6,
+        border: `1px solid ${border}`,
+        background: props.disabled ? "transparent" : bgPrimary,
         color: textPrimary,
         fontSize: FONT_SM,
         fontFamily: props.mono ? "ui-monospace, SFMono-Regular, Menlo, monospace" : "inherit",
         lineHeight: 1.5,
         resize: "vertical",
         outline: "none",
+        opacity: props.disabled ? 0.6 : 1,
+        ...(props.style ?? {}),
       }}
     />
   );
@@ -550,12 +612,14 @@ export function Select(props: {
   onChange: (value: string) => void;
   options: Array<{ value: string; label: string }>;
   disabled?: boolean;
+  title?: string;
   style?: Record<string, unknown>;
 }): unknown {
   return (
     <select
       value={props.value}
       disabled={props.disabled}
+      title={props.title}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
         width: "100%",
