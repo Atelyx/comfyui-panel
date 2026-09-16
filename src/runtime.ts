@@ -403,6 +403,11 @@ export class ComfyRuntime {
     return this.client.imageUrl(ref, preview);
   }
 
+  /** 参考图上传：写入 ComfyUI input 目录，返回的引用直接赋给 LoadImage 的 image 字段。 */
+  uploadImage(file: File): Promise<ImageRef> {
+    return this.client.uploadImage(file);
+  }
+
   /** 回填已落库路径。 */
   markSaved(key: string, savedPath: string): void {
     this.emit({
