@@ -14,6 +14,7 @@ import type { AtelyxCtx } from "../ctx";
 import type { ApiPrompt } from "../comfy/types";
 import type { ComfyRuntime, ResultImage } from "../runtime";
 import type { HostController } from "../host/controller";
+import type { RemoteControl } from "../host/remote";
 import { archiveImage, appendToCurrentNote } from "../host/archive";
 import { exportWorkflow, type StoredWorkflow } from "../workflow/library";
 import { workflowDisplayName } from "../workflow/files";
@@ -35,6 +36,7 @@ import {
 } from "../workflow/form";
 import { RecordFlow } from "./resultFlow";
 import { RefImageStack } from "./refImages";
+import { RemoteEntry } from "./remoteMachines";
 import {
   Button,
   Checkbox,
@@ -76,6 +78,7 @@ interface GeneratePanelProps {
   ctx: AtelyxCtx;
   runtime: ComfyRuntime;
   host: HostController;
+  remote: RemoteControl;
 }
 
 /** 输出比例预设（仅比例）：配合「分辨率」一起算出宽高。 */
@@ -96,7 +99,7 @@ const MEGAPIXEL_OPTIONS = ["0.5", "1", "1.5", "2", "4"];
 const BATCH_OPTIONS = ["1", "2", "3", "4"];
 
 export function GeneratePanel(props: GeneratePanelProps): unknown {
-  const { ctx, runtime, host } = props;
+  const { ctx, runtime, host, remote } = props;
   const snapshot = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot);
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
 
@@ -570,6 +573,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             style={{ maxWidth: 240, flex: 1 }}
           />
           <span style={{ flex: 1 }} />
+          <RemoteEntry remote={remote} />
           <Button onClick={() => void runtime.freeMemory()} disabled={offline} title="释放模型/显存，不影响队列">
             <ZapIcon size={12} />
             释放显存

@@ -27,6 +27,31 @@ export interface VaultWriteResult {
   summary: string;
 }
 
+/** 协作房间里的一个在线成员（`ctx.collab.peers()`）。 */
+export interface CollabPeer {
+  peerId: number;
+  nickname: string;
+  color: string;
+  deviceName: string;
+  /** 对方应用版本号；旧客户端可缺省。 */
+  version?: string;
+}
+
+/** 本端协作身份（`ctx.collab.myPeer()`；未连接时 peerId 为 null）。 */
+export interface CollabMyPeer {
+  peerId: number | null;
+  nickname: string;
+  color: string;
+  deviceName: string;
+}
+
+/** 宿主事件载荷（只列本插件订阅的事件）。 */
+export interface AtelyxEvents {
+  /** 收到同房间其他成员发来的插件消息；不含自己。 */
+  "collab:message": { peerId: number; channel: string; payload: unknown };
+  "collab:changed": { peers: CollabPeer[] };
+}
+
 /** 系统对话框过滤器。 */
 export interface DialogFilter {
   name: string;
@@ -91,6 +116,17 @@ export interface AtelyxCtx extends Context {
   clipboard: {
     readText(): Promise<string>;
     writeText(text: string): Promise<void>;
+  };
+  /** 协作房间（同一仓库的成员）。房间外看不到彼此，因此跨机协作以「同仓库」为前提。 */
+  collab: {
+    peers(): CollabPeer[];
+    /** 发往同房间其他成员；`to` 指定则定向单播。返回是否已投递到传输层。 */
+    sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
+    myPeer(): CollabMyPeer;
+  };
+  /** 宿主事件订阅；返回撤销函数，监听器随插件停用一并撤销。 */
+  events: {
+    on<K extends keyof AtelyxEvents>(name: K, listener: (payload: AtelyxEvents[K]) => void): () => void;
   };
   /**
    * 服务发现：用于「存在则用、不存在则降级」的可选依赖。

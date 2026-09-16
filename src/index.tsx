@@ -11,6 +11,7 @@ import type { AtelyxCtx } from "./ctx";
 import { loadSettings, DEFAULT_SETTINGS, type ComfySettings } from "./settings";
 import { ComfyRuntime } from "./runtime";
 import { HostController } from "./host/controller";
+import { RemoteControl } from "./host/remote";
 import { GeneratePanel } from "./views/GeneratePanel";
 import { resetGenerateSession } from "./views/generateSession";
 import { OrchestratePanel } from "./views/OrchestratePanel";
@@ -29,6 +30,7 @@ interface PanelDeps {
   ctx: AtelyxCtx;
   runtime: ComfyRuntime;
   host: HostController;
+  remote: RemoteControl;
   onSettingsChanged(next: ComfySettings): void;
 }
 
@@ -53,19 +55,27 @@ export default function apply(pluginCtx: AtelyxCtx): void {
     if (deps) {
       deps.runtime.applySettings(next);
       deps.host.applySettings(next);
+      deps.remote.applySettings(next);
     }
   };
+
+  // 协作入站订阅的撤销函数：远程命令会真的拉起进程，插件停用后必须不再受理
+  let detachRemote: (() => void) | null = null;
 
   void loadSettings(pluginCtx)
     .then((loaded) => {
       settings = loaded;
       const runtime = new ComfyRuntime(loaded);
+      const host = new HostController(pluginCtx, loaded);
+      const remote = new RemoteControl(pluginCtx, runtime, host, loaded);
       deps = {
         ctx: pluginCtx,
         runtime,
-        host: new HostController(pluginCtx, loaded),
+        host,
+        remote,
         onSettingsChanged,
       };
+      detachRemote = remote.attach();
       notify();
       // 连接由插件持有而非面板持有：两个面板共用同一个运行时，若把断开挂在某个面板的
       // 清理里，切到另一个面板就会把连接掐断（表现为「明明连上了却显示未连接」）。
@@ -110,7 +120,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
     if (!ready) return <InitPlaceholder />;
     return (
       <PanelShell>
-        <GeneratePanel ctx={ready.ctx} runtime={ready.runtime} host={ready.host} />
+        <GeneratePanel ctx={ready.ctx} runtime={ready.runtime} host={ready.host} remote={ready.remote} />
       </PanelShell>
     );
   }
@@ -163,6 +173,8 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       offSetting();
       disposeOrchestrateFrame();
       resetGenerateSession();
+      detachRemote?.();
+      detachRemote = null;
       deps?.runtime.disconnect();
     };
   });

@@ -27,6 +27,14 @@ const MAX_LOGS = 300;
 /** 加载大模型或首次编译会慢，给足时间但不无限等。 */
 const READY_TIMEOUT_MS = 180000;
 
+/** 启动请求的可选来源信息（远程启动据此注入参数并标明发起方）。 */
+export interface StartRequest {
+  /** 追加在用户附加参数之后的启动参数。 */
+  extraTokens?: readonly string[];
+  /** 触发来源，写进日志首行，便于事后分辨是谁起的进程。 */
+  origin?: string;
+}
+
 const EMPTY: HostSnapshot = {
   running: false,
   starting: false,
@@ -100,21 +108,28 @@ export class HostController {
     }
   }
 
-  /** 启动 ComfyUI 并等待服务就绪。 */
-  async start(runtime: ComfyRuntime): Promise<boolean> {
+  /**
+   * 启动 ComfyUI 并等待服务就绪。
+   *
+   * 返回 false 有两种含义——「已有进程/正在启动」与「启动失败」，界面据此分辨：失败原因在
+   * `error` 字段里，而前者不会写 error。远程受理在前一步自行判定，不靠这个返回值区分。
+   */
+  async start(runtime: ComfyRuntime, request: StartRequest = {}): Promise<boolean> {
     if (this.snap.starting || this.handle) return false;
     let line: string;
     try {
-      line = describeStartCommand(this.settings);
+      line = describeStartCommand(this.settings, request.extraTokens);
     } catch (err) {
       this.emit({ error: describe(err) });
       return false;
     }
     this.emit({ starting: true, error: "", startLine: line, logs: [] });
+    if (request.origin) this.log(request.origin);
     this.log(`$ ${line}`);
 
     try {
       this.handle = await startComfy(this.ctx, await this.getPlatform(), this.settings, {
+        extraTokens: request.extraTokens,
         onLog: (text, stream) => this.log(text, stream),
         onExit: (code) => {
           // 无论就绪前后退出，对界面而言都是「进程不在了」

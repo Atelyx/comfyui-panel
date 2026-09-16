@@ -1,5 +1,5 @@
 /**
- * 设置页：连接、进程托管、结果落库与工作流文件管理。
+ * 设置页：连接、进程托管、远程协作、结果落库与工作流文件管理。
  *
  * 逐项改动即落盘（不设保存按钮）：改动都由用户明确操作触发，改完不丢比批量提交更符合直觉。
  * 工作流清单来自 ComfyUI 用户目录（运行时轮询保持最新），重命名/删除直接作用于文件。
@@ -153,6 +153,34 @@ export function SettingsView(props: SettingsProps): unknown {
             外部模式：自行启动并带 --enable-cors-header
           </div>
         )}
+      </Card>
+
+      <Card title="远程协作">
+        <Field
+          label="允许远程启动"
+          hint="开启后，同一协作房间（同一仓库）的其他成员可以启动/停止本机 ComfyUI。远程启动会注入 --listen 0.0.0.0，本机服务将暴露给局域网。"
+        >
+          <Checkbox
+            checked={settings.remoteEnabled}
+            onChange={(checked) => patch({ remoteEnabled: checked })}
+            label="受理同房间成员的远程启动"
+          />
+        </Field>
+        <Field
+          label="本机标识"
+          hint="命令的目标匹配与回执展示；留空用宿主设备名。它不是口令——能否发命令由上面的开关决定。"
+        >
+          <TextInput
+            value={settings.remoteTag}
+            onChange={(value) => patch({ remoteTag: value })}
+            placeholder="留空使用设备名"
+          />
+        </Field>
+        <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
+          停止不受上面的开关限制：远程拉起的进程仍可被远程收掉，否则对端会留下一个它自己收不回的进程。
+          <br />
+          在生成面板工具栏的「远程」里启停其他机器；本机要连哪台机器，在「连接」里自行填对方的局域网地址与端口。
+        </div>
       </Card>
 
       <Card title="结果落库">
