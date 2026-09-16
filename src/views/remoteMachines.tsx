@@ -1,7 +1,7 @@
 /**
  * 远程启停入口：工具栏上的按钮 + 在线机器列表。
  *
- * 列表就是协作房间的成员，能不能远程启停看对方回执（未回执 = 对端没装或没启用本插件）。
+ * 列表就是同房间的成员，能不能远程启停看对方回执（未回执 = 对端没装或没启用本插件）。
  * 只在弹层打开期间刷新，关掉即停——别的成员启停服务不是高频事件，没必要常驻轮询。
  *
  * 启停后本端的连接地址不会自动切到对方：地址由用户在设置里填（宿主不提供对端 IP），
@@ -43,7 +43,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
 
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
-      <Button onClick={() => setOpen((current) => !current)} active={open} title="经协作房间启停其他机器上的 ComfyUI">
+      <Button onClick={() => setOpen((current) => !current)} active={open} title="经协作通道启停同房间其他机器上的 ComfyUI">
         远程
         {remoteCount > 0 ? ` ${remoteCount}` : ""}
       </Button>
@@ -68,7 +68,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <StatusDot
               tone={snapshot.scanning ? "idle" : snapshot.error ? "bad" : "ok"}
-              label={snapshot.scanning ? "查询中…" : snapshot.error ? "通道不可用" : "协作房间"}
+              label={snapshot.scanning ? "查询中…" : snapshot.error ? "通道不可用" : "协作通道"}
             />
             <span style={{ flex: 1 }} />
             <Button onClick={() => void remote.scan()} disabled={snapshot.scanning}>
@@ -80,7 +80,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
 
           {snapshot.machines.length === 0 ? (
             <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
-              房间里没有其他成员。远程启停要求两台机器都启用协作、连同一个中转，并打开同一个仓库。
+              同房间里没有其他成员。远程启停要求两台机器都启用协作、连同一个中转，并打开同一个仓库。
             </div>
           ) : (
             snapshot.machines.map((machine) => <MachineRow key={machine.peerId} machine={machine} remote={remote} />)

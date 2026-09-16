@@ -28,7 +28,7 @@ export interface ComfySettings {
   archiveFolder: string;
   /** 落库后是否把图片追加到当前笔记。 */
   appendToNote: boolean;
-  /** 是否受理同协作房间其他成员的远程启停命令。 */
+  /** 是否受理同房间其他成员的远程启停命令。 */
   remoteEnabled: boolean;
   /** 本机标识：远程命令的目标匹配与回执展示；留空回落到宿主的设备名。 */
   remoteTag: string;

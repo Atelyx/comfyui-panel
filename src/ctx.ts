@@ -27,7 +27,7 @@ export interface VaultWriteResult {
   summary: string;
 }
 
-/** 协作房间里的一个在线成员（`ctx.collab.peers()`）。 */
+/** 同房间里的一个在线成员（`ctx.collab.peers()`）。 */
 export interface CollabPeer {
   peerId: number;
   nickname: string;
@@ -117,7 +117,11 @@ export interface AtelyxCtx extends Context {
     readText(): Promise<string>;
     writeText(text: string): Promise<void>;
   };
-  /** 协作房间（同一仓库的成员）。房间外看不到彼此，因此跨机协作以「同仓库」为前提。 */
+  /**
+   * 协作服务：同房间（同一仓库）的成员与消息收发。
+   *
+   * 房间按仓库划分，房间外看不到彼此——跨机协作因此以「两端打开同一仓库」为前提。
+   */
   collab: {
     peers(): CollabPeer[];
     /** 发往同房间其他成员；`to` 指定则定向单播。返回是否已投递到传输层。 */

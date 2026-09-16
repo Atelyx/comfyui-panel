@@ -1,5 +1,5 @@
 /**
- * 设置页：连接、进程托管、远程协作、结果落库与工作流文件管理。
+ * 设置页：连接、进程托管、远程启停、结果落库与工作流文件管理。
  *
  * 逐项改动即落盘（不设保存按钮）：改动都由用户明确操作触发，改完不丢比批量提交更符合直觉。
  * 工作流清单来自 ComfyUI 用户目录（运行时轮询保持最新），重命名/删除直接作用于文件。
@@ -155,10 +155,10 @@ export function SettingsView(props: SettingsProps): unknown {
         )}
       </Card>
 
-      <Card title="远程协作">
+      <Card title="远程启停">
         <Field
           label="允许远程启动"
-          hint="开启后，同一协作房间（同一仓库）的其他成员可以启动/停止本机 ComfyUI。远程启动会注入 --listen 0.0.0.0，本机服务将暴露给局域网。"
+          hint="开启后，同房间（同一仓库）的其他成员可以启动/停止本机 ComfyUI。远程启动会注入 --listen 0.0.0.0，本机服务将暴露给局域网。"
         >
           <Checkbox
             checked={settings.remoteEnabled}
