@@ -1,6 +1,6 @@
 {
   "name": "com.atelyx.comfyui-panel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "src/index.tsx",
   "description": "把本机 ComfyUI 嵌入 Atelyx：面板内挑选工作流、调参、排队生成、查看实时进度，并把结果保存进当前仓库；另一面板内嵌 ComfyUI 原生编排界面。支持托管启动与停止 ComfyUI 进程。",
   "author": "Atelyx",
