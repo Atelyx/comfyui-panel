@@ -62,26 +62,6 @@ export function writeWorkflowFile(client: ComfyClient, path: string, content: st
   return client.writeUserFile(path, content);
 }
 
-/** 删除文件。 */
-export function deleteWorkflowFile(client: ComfyClient, path: string): Promise<void> {
-  return client.deleteUserFile(path);
-}
-
-/** 重命名：把文件移到同目录下的新名字（ComfyUI 的 move 接口）。 */
-export function renameWorkflowFile(client: ComfyClient, path: string, newName: string): Promise<void> {
-  return client.moveUserFile(path, destWorkflowPath(newName));
-}
-
-/** 由用户给的名字生成合法的文件路径：去掉路径分隔符与 .json 后缀，落到 workflows 目录。 */
-export function destWorkflowPath(name: string): string {
-  let base = name.trim();
-  if (base.toLowerCase().endsWith(".json")) base = base.slice(0, -5);
-  // 文件名里不允许出现目录分隔符，避免意外写到别处
-  base = base.replace(/[\\/]/g, "_").replace(/\.{2,}/g, ".").replace(/[:*?"<>|]/g, "_").trim();
-  if (!base) base = "未命名工作流";
-  return `${WORKFLOWS_DIR}/${base}.json`;
-}
-
 /** 展示名：去目录与 .json 后缀。 */
 export function workflowDisplayName(path: string): string {
   const name = path.slice(path.lastIndexOf("/") + 1);

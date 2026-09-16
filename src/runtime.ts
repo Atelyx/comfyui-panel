@@ -26,11 +26,9 @@ import { baseUrl, type ComfySettings } from "./settings";
 import {
   listWorkflows,
   loadWorkflow as loadWorkflowFromLibrary,
-  saveWorkflowAsFile as saveWorkflowFileToLibrary,
-  renameWorkflow as renameWorkflowInLibrary,
-  deleteWorkflow as deleteWorkflowInLibrary,
+  saveWorkflowParams as saveWorkflowParamsInLibrary,
   type LoadWorkflowResult,
-  type SaveWorkflowResult,
+  type SaveParamsResult,
 } from "./workflow/library";
 import { diffWorkflows, type WorkflowFileInfo } from "./workflow/files";
 
@@ -230,23 +228,11 @@ export class ComfyRuntime {
     return loadWorkflowFromLibrary(this.client, file);
   }
 
-  /** 保存为新文件（覆盖同名），成功后立即刷新列表。 */
-  async saveWorkflowFile(name: string, content: string): Promise<SaveWorkflowResult> {
-    const result = await saveWorkflowFileToLibrary(this.client, name, content);
+  /** 把参数草稿写回工作流文件，成功后立即刷新列表。 */
+  async saveWorkflowParams(file: WorkflowFileInfo, prompt: ApiPrompt): Promise<SaveParamsResult> {
+    const result = await saveWorkflowParamsInLibrary(this.client, file, prompt);
     if (result.ok) void this.refreshWorkflows();
     return result;
-  }
-
-  /** 重命名文件，成功后立即刷新列表。 */
-  async renameWorkflowFile(path: string, newName: string): Promise<void> {
-    await renameWorkflowInLibrary(this.client, path, newName);
-    void this.refreshWorkflows();
-  }
-
-  /** 删除文件，成功后立即刷新列表。 */
-  async deleteWorkflowFile(path: string): Promise<void> {
-    await deleteWorkflowInLibrary(this.client, path);
-    void this.refreshWorkflows();
   }
 
   private startSocket(): void {

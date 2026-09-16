@@ -9,8 +9,7 @@ import type { AtelyxCtx } from "../ctx";
 import { DEFAULT_SETTINGS, saveSettings, type ComfySettings, type ProcessMode } from "../settings";
 import type { ComfyRuntime } from "../runtime";
 import type { HostController } from "../host/controller";
-import { workflowDisplayName } from "../workflow/files";
-import { Button, Card, Checkbox, ConfirmButton, Field, Notice, Select, TextArea, TextInput, textMuted, textPrimary, FONT_SM } from "./ui";
+import { Button, Card, Checkbox, Field, Notice, Select, TextArea, TextInput, textMuted, textPrimary, FONT_SM } from "./ui";
 
 interface SettingsProps {
   ctx: AtelyxCtx;
@@ -20,23 +19,11 @@ interface SettingsProps {
   onSettingsChanged(settings: ComfySettings): void;
 }
 
-/** 文件大小展示（列表页不读文件正文，只有 size）。 */
-function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-}
-
 export function SettingsView(props: SettingsProps): unknown {
   const { ctx, runtime, host, onSettingsChanged } = props;
   const snapshot = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot);
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
   const settings = snapshot.settings;
-  const workflows = snapshot.workflows;
-  const offline = snapshot.channel === "offline";
-  const [renameId, setRenameId] = React.useState<string | null>(null);
-  const [renameText, setRenameText] = React.useState("");
   const [dialogError, setDialogError] = React.useState("");
 
   /** 改一项设置：本地立即生效（UI 无延迟），随后落盘。 */
@@ -183,96 +170,6 @@ export function SettingsView(props: SettingsProps): unknown {
             label="保存结果后追加到当前笔记"
           />
         </Field>
-      </Card>
-
-      <Card
-        title={`工作流（${workflows.length}）`}
-        actions={
-          <div style={{ display: "flex", gap: 6 }}>
-            <Button onClick={() => void runtime.refreshWorkflows()} disabled={offline}>
-              刷新
-            </Button>
-            <ConfirmButton
-              label="全部删除"
-              confirmLabel={`确认删除全部 ${workflows.length} 个`}
-              disabled={workflows.length === 0 || offline}
-              onConfirm={() =>
-                void (async () => {
-                  for (const item of workflows) await runtime.deleteWorkflowFile(item.path);
-                })()
-              }
-            />
-          </div>
-        }
-      >
-        {offline ? (
-          <div style={{ color: textMuted, lineHeight: 1.6 }}>未连接：工作流文件由 ComfyUI 目录提供</div>
-        ) : snapshot.workflowsError ? (
-          <div style={{ color: textMuted, lineHeight: 1.6 }}>{snapshot.workflowsError}</div>
-        ) : workflows.length === 0 ? (
-          <div style={{ color: textMuted, lineHeight: 1.6 }}>
-            还没有工作流；在编排界面保存的工作流会自动出现在这里
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {workflows.map((item) => (
-              <div
-                key={item.path}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "6px 8px",
-                  borderRadius: 6,
-                  border: `1px solid var(--border)`,
-                }}
-              >
-                {renameId === item.path ? (
-                  <>
-                    <TextInput value={renameText} onChange={setRenameText} />
-                    <Button
-                      onClick={() => {
-                        void runtime
-                          .renameWorkflowFile(item.path, renameText)
-                          .then(() => setRenameId(null))
-                          .catch((err: unknown) => setDialogError(err instanceof Error ? err.message : String(err)));
-                      }}
-                    >
-                      确定
-                    </Button>
-                    <Button onClick={() => setRenameId(null)}>取消</Button>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {workflowDisplayName(item.path)}
-                      </div>
-                      <div style={{ fontSize: 11, color: textMuted }}>
-                        {formatSize(item.size)} · {new Date(item.modified).toLocaleString()}
-                      </div>
-                    </div>
-                    <Button
-                      disabled={offline}
-                      onClick={() => {
-                        setRenameId(item.path);
-                        setRenameText(workflowDisplayName(item.path));
-                      }}
-                    >
-                      重命名
-                    </Button>
-                    <ConfirmButton
-                      label="删除"
-                      confirmLabel="确认删除"
-                      disabled={offline}
-                      onConfirm={() => void runtime.deleteWorkflowFile(item.path)}
-                    />
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
       </Card>
 
       <div style={{ color: textMuted, fontSize: 11, lineHeight: 1.6 }}>

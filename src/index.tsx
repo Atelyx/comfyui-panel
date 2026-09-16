@@ -12,7 +12,9 @@ import { loadSettings, DEFAULT_SETTINGS, type ComfySettings } from "./settings";
 import { ComfyRuntime } from "./runtime";
 import { HostController } from "./host/controller";
 import { GeneratePanel } from "./views/GeneratePanel";
+import { resetGenerateSession } from "./views/generateSession";
 import { OrchestratePanel } from "./views/OrchestratePanel";
+import { disposeOrchestrateFrame } from "./views/orchestrateFrame";
 import { SettingsView } from "./views/Settings";
 import { bgSecondary, border, FONT_SM, textMuted } from "./views/ui";
 
@@ -159,6 +161,8 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       offPanel();
       offOrchestrate();
       offSetting();
+      disposeOrchestrateFrame();
+      resetGenerateSession();
       deps?.runtime.disconnect();
     };
   });

@@ -14,7 +14,8 @@ import type { ComfyRuntime, ResultImage } from "../runtime";
 import type { HostController } from "../host/controller";
 import { archiveImage, appendToCurrentNote } from "../host/archive";
 import { exportWorkflow, type StoredWorkflow } from "../workflow/library";
-import { destWorkflowPath, workflowDisplayName } from "../workflow/files";
+import { workflowDisplayName } from "../workflow/files";
+import { getGenerateSession, saveGenerateSession } from "./generateSession";
 import {
   applySeedMode,
   buildFields,
@@ -35,7 +36,6 @@ import {
   CollapseCard,
   CopyIcon,
   Empty,
-  FolderIcon,
   ImageIcon,
   Notice,
   Panel,
@@ -74,31 +74,31 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
 
   const workflows = snapshot.workflows;
-  const [activeId, setActiveId] = React.useState<string>("");
-  const [active, setActive] = React.useState<StoredWorkflow | null>(null);
-  const [draft, setDraft] = React.useState<ApiPrompt | null>(null);
-  const [seedMode, setSeedMode] = React.useState<ReadonlySet<string>>(new Set());
-  const [loadedModified, setLoadedModified] = React.useState<number>(-1);
+  const session = getGenerateSession();
+  const [activeId, setActiveId] = React.useState<string>(() => session.activeId);
+  const [active, setActive] = React.useState<StoredWorkflow | null>(() => session.active);
+  const [draft, setDraft] = React.useState<ApiPrompt | null>(() => session.draft);
+  const [seedMode, setSeedMode] = React.useState<ReadonlySet<string>>(() => session.seedMode);
+  const [loadedModified, setLoadedModified] = React.useState<number>(() => session.loadedModified);
   /** 参数被改过就不再自动重载，避免覆盖正在调的值。 */
-  const [dirty, setDirty] = React.useState(false);
+  const [dirty, setDirty] = React.useState<boolean>(() => session.dirty);
   /** 选中的文件在编排界面被改过、而本地又有改动时的提示条。 */
   const [fileUpdated, setFileUpdated] = React.useState(false);
   /** 读取/转换失败的原因（如子图无法转换）。 */
   const [loadError, setLoadError] = React.useState("");
-  const [saveOpen, setSaveOpen] = React.useState(false);
-  const [saveText, setSaveText] = React.useState("");
-  const [saveName, setSaveName] = React.useState("");
-  const [saveError, setSaveError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [actionError, setActionError] = React.useState("");
-  const [filter, setFilter] = React.useState("");
+  const [filter, setFilter] = React.useState<string>(() => session.filter);
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(new Set());
-  const [dragOver, setDragOver] = React.useState(false);
   const [previewKey, setPreviewKey] = React.useState<string | null>(null);
   const [savingKey, setSavingKey] = React.useState<string | null>(null);
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const offline = snapshot.channel === "offline";
+
+  // 切走再回来时恢复上次的选择与草稿：状态变化即写回会话存储
+  React.useEffect(() => {
+    saveGenerateSession({ activeId, active, draft, seedMode, dirty, loadedModified, filter });
+  }, [activeId, active, draft, seedMode, dirty, loadedModified, filter]);
 
   // 选中文件：首次加载、切换、或该文件被外部改动时重载
   React.useEffect(() => {
@@ -260,36 +260,27 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
     });
   }, []);
 
-  /** 读入文件内容到保存框（拖拽与文件选择共用），仍由用户点「保存」确认。 */
-  const readJsonFile = React.useCallback((file: File) => {
-    setSaveError("");
-    void file
-      .text()
-      .then(setSaveText)
-      .catch((err: unknown) =>
-        setSaveError(`读取文件失败：${err instanceof Error ? err.message : String(err)}`),
-      );
-  }, []);
-
-  const doSave = React.useCallback(() => {
+  /** 把当前参数草稿写回工作流文件；写完后静默重载读回（内容与草稿一致）。 */
+  const doSaveParams = React.useCallback(() => {
+    if (!active || !draft) return;
+    const file = workflows.find((item) => item.path === active.id);
+    if (!file) return;
     setBusy(true);
-    setSaveError("");
+    setActionError("");
     void runtime
-      .saveWorkflowFile(saveName, saveText)
+      .saveWorkflowParams(file, draft)
       .then((result) => {
         if (!result.ok) {
-          setSaveError(result.error);
+          setActionError(result.error);
           return;
         }
-        setSaveOpen(false);
-        setSaveText("");
-        setSaveName("");
-        setSaveError("");
-        setActiveId(result.path);
+        setDirty(false);
+        setFileUpdated(false);
+        ctx.notification.notify({ level: "success", message: `已保存参数到「${active.name}」` });
       })
-      .catch((err: unknown) => setSaveError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setActionError(err instanceof Error ? err.message : String(err)))
       .finally(() => setBusy(false));
-  }, [runtime, saveName, saveText]);
+  }, [active, draft, workflows, runtime, ctx]);
 
   const doRun = React.useCallback(() => {
     if (!draft || !active) return;
@@ -331,8 +322,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const progressValue =
     snapshot.progress && snapshot.progress.max > 0 ? snapshot.progress.value / snapshot.progress.max : 0;
   const previewed = previewKey ? snapshot.results.find((item) => item.key === previewKey) ?? null : null;
-  const saveTarget = saveOpen ? destWorkflowPath(saveName) : "";
-  const saveCollides = saveOpen && !!saveTarget && workflows.some((item) => item.path === saveTarget);
 
   return (
     <Panel
@@ -429,19 +418,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             }
             style={{ maxWidth: 260 }}
           />
-          <Button
-            onClick={() => {
-              if (!saveOpen) setSaveName(active?.name ?? "");
-              setSaveOpen((open) => !open);
-            }}
-          >
-            {saveOpen ? "取消" : (
-              <>
-                <UploadIcon size={12} />
-                保存为新文件
-              </>
-            )}
-          </Button>
           {draft ? (
             <span style={{ flex: 1, textAlign: "right", fontSize: 11, color: textMuted }}>
               {Object.keys(draft).length} 个节点 · {fields.length} 项参数
@@ -465,80 +441,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             <Notice tone="error" onClose={() => setLoadError("")}>
               {loadError}；该工作流请在编排界面打开
             </Notice>
-          </div>
-        ) : null}
-
-        {saveOpen ? (
-          <div
-            onDragOver={(e: { preventDefault(): void }) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e: { preventDefault(): void; dataTransfer: { files?: FileList | null } }) => {
-              e.preventDefault();
-              setDragOver(false);
-              const file = e.dataTransfer.files?.[0];
-              if (file) readJsonFile(file);
-            }}
-            style={{
-              border: `1px solid ${dragOver ? accent : border}`,
-              borderRadius: 8,
-              padding: 10,
-              margin: "0 10px 10px",
-              background: bgSecondary,
-            }}
-          >
-            <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6, marginBottom: 6 }}>
-              把 JSON 保存为 ComfyUI 目录里的新工作流文件；粘贴或拖拽「导出（API）」的 JSON 即可。
-            </div>
-            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-              <TextInput
-                value={saveName}
-                onChange={setSaveName}
-                placeholder="文件名（自动补 .json）"
-                style={{ flex: 1 }}
-              />
-            </div>
-            {saveCollides ? (
-              <div style={{ marginBottom: 6 }}>
-                <Notice tone="warn">同名文件已存在，保存将覆盖</Notice>
-              </div>
-            ) : null}
-            <TextArea
-              value={saveText}
-              onChange={setSaveText}
-              placeholder='{"3": {"class_type": "KSampler", "inputs": { ... }}}'
-              rows={5}
-              mono
-            />
-            {saveError ? (
-              <div style={{ marginTop: 6 }}>
-                <Notice tone="error">{saveError}</Notice>
-              </div>
-            ) : null}
-            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              <Button tone="primary" onClick={doSave} disabled={busy || !saveText.trim() || !saveName.trim()}>
-                保存
-              </Button>
-              <Button onClick={() => fileInputRef.current?.click()}>
-                <FolderIcon size={12} />
-                从文件读取
-              </Button>
-              <span style={{ alignSelf: "center", fontSize: 11, color: textMuted }}>或拖拽 .json 到此处</span>
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,application/json"
-              style={{ display: "none" }}
-              onChange={(e: { target: { files?: FileList | null; value: string } }) => {
-                const file = e.target.files?.[0];
-                // 清空以便连续选同一个文件也能再次触发 change
-                e.target.value = "";
-                if (file) readJsonFile(file);
-              }}
-            />
           </div>
         ) : null}
 
@@ -611,13 +513,18 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 />
               </div>
               <Button
-                onClick={() => {
-                  if (!active) return;
-                  setDraft(structuredClone(active.prompt));
-                  setDirty(false);
-                }}
+                onClick={reloadActive}
+                disabled={!activeId || offline}
+                title="放弃本地参数改动，读回工作流文件里的参数"
               >
-                重置
+                重新加载
+              </Button>
+              <Button
+                onClick={doSaveParams}
+                disabled={!active || !draft || busy || offline}
+                title="把当前参数写回工作流文件"
+              >
+                保存参数
               </Button>
             </div>
 

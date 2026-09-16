@@ -201,3 +201,57 @@ export function convertUiToApi(raw: unknown): ConvertResult {
 
   return { ok: true, prompt };
 }
+
+/** 参数写回结果。 */
+export type WriteBackResult = { ok: true; workflow: unknown } | { ok: false; error: string };
+
+/**
+ * 把草稿（API 格式）的字面量参数写回 UI 格式文件的 widget 槽位。
+ *
+ * 与 convertUiToApi 共用同一条遍历规则（含 seed 后的 control_after_generate 槽位），
+ * 只覆盖字面量值；连线引用与节点结构不动。草稿里没有的输入保持文件原值。
+ */
+export function applyDraftToUi(raw: unknown, prompt: ApiPrompt): WriteBackResult {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "顶层应是一个对象" };
+  }
+  const workflow = raw as UiWorkflow;
+  if (!Array.isArray(workflow.nodes)) {
+    return { ok: false, error: "不是可识别的工作流 JSON（缺少 nodes 数组）" };
+  }
+  const excluded = new Set<number | string>();
+  for (const node of workflow.nodes) {
+    if (!node) continue;
+    if (node.mode === 4 || SKIP_NODE_TYPES.has(node.type ?? "")) excluded.add(node.id);
+  }
+  for (const node of workflow.nodes) {
+    if (!node || node.id === undefined || node.id === null || excluded.has(node.id)) continue;
+    const entry = prompt[String(node.id)];
+    if (!entry) continue;
+    const named = node.widgets_values_named;
+    const positional = Array.isArray(node.widgets_values) ? node.widgets_values : null;
+    let widgetIdx = 0;
+    for (const input of node.inputs ?? []) {
+      const name = input.name;
+      if (!name || input.link != null || !input.widget) continue;
+      if (named && typeof named === "object") {
+        const value = entry.inputs[name];
+        if (value === undefined) continue;
+        named[name] = value;
+        const widgetName = input.widget.name;
+        if (widgetName && widgetName !== name && named[widgetName] !== undefined) {
+          named[widgetName] = value;
+        }
+        continue;
+      }
+      if (!positional) continue;
+      const value = entry.inputs[name];
+      if (value !== undefined && widgetIdx < positional.length) {
+        positional[widgetIdx] = value;
+      }
+      widgetIdx += 1;
+      if (SEED_INPUTS.has(name)) widgetIdx += 1;
+    }
+  }
+  return { ok: true, workflow: raw };
+}

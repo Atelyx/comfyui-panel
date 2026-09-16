@@ -193,17 +193,4 @@ export class ComfyClient {
       body: content,
     });
   }
-
-  /** 删除用户文件。 */
-  async deleteUserFile(path: string): Promise<void> {
-    await this.userdataRequest(`/userdata/${ComfyClient.encodePath(path)}`, { method: "DELETE" });
-  }
-
-  /** 移动/重命名用户文件。 */
-  async moveUserFile(path: string, dest: string): Promise<void> {
-    await this.userdataRequest(
-      `/userdata/${ComfyClient.encodePath(path)}/move/${ComfyClient.encodePath(dest)}`,
-      { method: "POST" },
-    );
-  }
 }

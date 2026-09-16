@@ -7,13 +7,10 @@
  */
 import type { ComfyClient } from "../comfy/client";
 import type { ApiPrompt } from "../comfy/types";
-import { isApiFormat, convertUiToApi } from "./convert";
+import { isApiFormat, convertUiToApi, applyDraftToUi } from "./convert";
 import {
-  deleteWorkflowFile,
-  destWorkflowPath,
   listWorkflowFiles,
   readWorkflowFile,
-  renameWorkflowFile,
   writeWorkflowFile,
   type WorkflowFileInfo,
 } from "./files";
@@ -23,8 +20,8 @@ export type LoadWorkflowResult =
   | { ok: true; workflow: StoredWorkflow }
   | { ok: false; error: string };
 
-/** 保存结果。 */
-export type SaveWorkflowResult = { ok: true; path: string } | { ok: false; error: string };
+/** 参数写回结果。 */
+export type SaveParamsResult = { ok: true } | { ok: false; error: string };
 
 /** 已加载的工作流：prompt 是可直接提交的 API 格式。 */
 export interface StoredWorkflow {
@@ -91,51 +88,45 @@ export async function loadWorkflow(client: ComfyClient, file: WorkflowFileInfo):
 }
 
 /**
- * 把内容保存成工作流目录下的新文件（覆盖同名文件）。
- * 内容须是可识别的 JSON（API 或 UI 格式），文件名由调用方给定。
+ * 把参数草稿写回工作流文件。
+ * UI 格式只覆盖 widget 值（保持节点结构与连线）；API 格式整体替换为草稿。
  */
-export async function saveWorkflowAsFile(
+export async function saveWorkflowParams(
   client: ComfyClient,
-  name: string,
-  content: string,
-): Promise<SaveWorkflowResult> {
-  let parsed: unknown;
+  file: WorkflowFileInfo,
+  prompt: ApiPrompt,
+): Promise<SaveParamsResult> {
+  let text: string;
   try {
-    parsed = JSON.parse(content);
-  } catch (err) {
-    return { ok: false, error: `不是合法 JSON：${err instanceof Error ? err.message : String(err)}` };
-  }
-  if (!isApiFormat(parsed) && !looksLikeUiWorkflow(parsed)) {
-    return { ok: false, error: "无法识别工作流格式：既不是 API 格式（节点 id → {class_type}），也不是 UI 格式（含 nodes 数组）" };
-  }
-  const path = destWorkflowPath(name);
-  try {
-    await writeWorkflowFile(client, path, content);
+    text = await readWorkflowFile(client, file.path);
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return { ok: true, path };
-}
-
-/** 重命名文件（ComfyUI 侧 move）。 */
-export async function renameWorkflow(client: ComfyClient, path: string, newName: string): Promise<void> {
-  await renameWorkflowFile(client, path, newName);
-}
-
-/** 删除文件。 */
-export async function deleteWorkflow(client: ComfyClient, path: string): Promise<void> {
-  await deleteWorkflowFile(client, path);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, error: `文件不是合法 JSON：${err instanceof Error ? err.message : String(err)}` };
+  }
+  try {
+    let content: string;
+    if (isApiFormat(parsed)) {
+      content = JSON.stringify(prompt, null, 2);
+    } else {
+      const applied = applyDraftToUi(parsed, prompt);
+      if (!applied.ok) return { ok: false, error: applied.error };
+      content = JSON.stringify(applied.workflow, null, 2);
+    }
+    await writeWorkflowFile(client, file.path, content);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return { ok: true };
 }
 
 /** 导出为可直接分享的 JSON 文本。 */
 export function exportWorkflow(workflow: StoredWorkflow): string {
   return JSON.stringify(workflow.prompt, null, 2);
-}
-
-/** UI 格式的粗判：顶层有 nodes 数组。 */
-function looksLikeUiWorkflow(raw: unknown): boolean {
-  return !!raw && typeof raw === "object" && !Array.isArray(raw)
-    && Array.isArray((raw as Record<string, unknown>).nodes);
 }
 
 /**
