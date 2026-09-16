@@ -189,6 +189,33 @@ export function applySeedMode(prompt: ApiPrompt, seedMode: ReadonlySet<string>):
   return next;
 }
 
+/** 从 "16:9 (Widescreen)" 这类值里取出比例对；解析不了返回 null。 */
+export function parseAspectPair(value: string): { w: number; h: number } | null {
+  const match = /^(\d+):(\d+)/.exec(value.trim());
+  if (!match) return null;
+  const w = Number(match[1]);
+  const h = Number(match[2]);
+  return w > 0 && h > 0 ? { w, h } : null;
+}
+
+/**
+ * 默认勾选「每次随机」的种子字段：未连线的 seed/noise_seed。
+ * 文件里 seed 的 control_after_generate 在转 API 格式时被丢弃，读不回来，就默认全部随机，
+ * 需要固定种子时在表单里取消勾选。
+ */
+export function defaultSeedKeys(prompt: ApiPrompt): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const [nodeId, node] of Object.entries(prompt)) {
+    const inputs = node.inputs ?? {};
+    for (const [input, value] of Object.entries(inputs)) {
+      if (input !== "seed" && input !== "noise_seed") continue;
+      if (Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && value[0] in prompt) continue;
+      keys.add(`${nodeId}.${input}`);
+    }
+  }
+  return keys;
+}
+
 /** 勾选状态与随机种子的集合键。 */
 export function fieldKey(field: FieldSpec): string {
   return `${field.nodeId}.${field.input}`;
