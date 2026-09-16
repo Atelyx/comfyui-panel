@@ -21,6 +21,10 @@ export interface GenerateSession {
   /** 加载时刻的文件 mtime，用于检测编排界面里的修改。 */
   loadedModified: number;
   filter: string;
+  /** 高级参数折叠区是否展开。 */
+  advancedOpen: boolean;
+  /** 主提示词输入框绑定的字段（`nodeId.input`）；空 = 自动取第一个提示词字段。 */
+  promptFieldKey: string;
 }
 
 let session: GenerateSession = emptyGenerateSession();
@@ -34,6 +38,8 @@ export function emptyGenerateSession(): GenerateSession {
     dirty: false,
     loadedModified: -1,
     filter: "",
+    advancedOpen: false,
+    promptFieldKey: "",
   };
 }
 
