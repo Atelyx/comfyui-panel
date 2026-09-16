@@ -26,7 +26,6 @@
     "declares": [
       "shell",
       "state",
-      "storage",
       "vault",
       "notification",
       "dialog",
@@ -38,10 +37,9 @@
     "permissions": {
       "shell": "按你的配置启动与停止 ComfyUI 进程（可在设置里改为「仅检测」不托管进程）",
       "state": "保存本插件的设置（地址/端口/启动方式/落库选项）",
-      "storage": "保存导入的工作流库（API 格式 JSON）",
       "vault": "把生成结果写入当前仓库的附件目录；清理落库过程中的临时文件",
       "notification": "启动失败、连接失败、落库结果等提示",
-      "dialog": "选择 ComfyUI 安装目录与导入工作流文件",
+      "dialog": "选择 ComfyUI 安装目录与 Python 可执行文件",
       "native": "调用宿主的附件导入命令，把生成结果的图片字节落进仓库附件目录（插件上下文没有二进制写盘通道）",
       "app": "读取宿主平台信息，决定启动命令的写法",
       "clipboard": "把工作流 API JSON 复制到剪贴板",

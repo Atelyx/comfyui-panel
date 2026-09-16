@@ -77,7 +77,7 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
               flexShrink: 0,
             }}
           >
-            界面由 ComfyUI 提供；导入工作流请在 ComfyUI 内「导出（API）」
+            界面由 ComfyUI 提供；在此保存的工作流（工作流 → 保存）会自动出现在生成面板的列表里
           </div>
         </>
       )}

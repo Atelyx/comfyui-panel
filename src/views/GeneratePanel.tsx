@@ -1,6 +1,10 @@
 /**
  * 生成面板：选工作流、调参数、提交、看进度、取结果。
  *
+ * 工作流来自 ComfyUI 用户目录（`user/default/workflows`）：列表由运行时轮询 `/userdata`
+ * 保持最新——编排界面里保存的修改几秒内会出现在这里。选中文件被外部改动时：
+ * 本地没改过参数就自动重载，改过则提示手动重载，不覆盖用户正在调的参数。
+ *
  * 三段布局各自滚动，避免长参数表把结果区挤没。
  */
 import React from "react";
@@ -9,15 +13,8 @@ import type { ApiPrompt } from "../comfy/types";
 import type { ComfyRuntime, ResultImage } from "../runtime";
 import type { HostController } from "../host/controller";
 import { archiveImage, appendToCurrentNote } from "../host/archive";
-import {
-  addWorkflow,
-  exportWorkflow,
-  listWorkflows,
-  loadWorkflow,
-  validateApiPrompt,
-  type StoredWorkflow,
-  type WorkflowSummary,
-} from "../workflow/library";
+import { exportWorkflow, type StoredWorkflow } from "../workflow/library";
+import { destWorkflowPath, workflowDisplayName } from "../workflow/files";
 import {
   applySeedMode,
   buildFields,
@@ -76,14 +73,22 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const snapshot = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot);
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
 
-  const [workflows, setWorkflows] = React.useState<WorkflowSummary[]>([]);
+  const workflows = snapshot.workflows;
   const [activeId, setActiveId] = React.useState<string>("");
   const [active, setActive] = React.useState<StoredWorkflow | null>(null);
   const [draft, setDraft] = React.useState<ApiPrompt | null>(null);
   const [seedMode, setSeedMode] = React.useState<ReadonlySet<string>>(new Set());
-  const [importOpen, setImportOpen] = React.useState(false);
-  const [importText, setImportText] = React.useState("");
-  const [importError, setImportError] = React.useState("");
+  const [loadedModified, setLoadedModified] = React.useState<number>(-1);
+  /** 参数被改过就不再自动重载，避免覆盖正在调的值。 */
+  const [dirty, setDirty] = React.useState(false);
+  /** 选中的文件在编排界面被改过、而本地又有改动时的提示条。 */
+  const [fileUpdated, setFileUpdated] = React.useState(false);
+  /** 读取/转换失败的原因（如子图无法转换）。 */
+  const [loadError, setLoadError] = React.useState("");
+  const [saveOpen, setSaveOpen] = React.useState(false);
+  const [saveText, setSaveText] = React.useState("");
+  const [saveName, setSaveName] = React.useState("");
+  const [saveError, setSaveError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [actionError, setActionError] = React.useState("");
   const [filter, setFilter] = React.useState("");
@@ -93,38 +98,70 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const [savingKey, setSavingKey] = React.useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
-  const refreshWorkflows = React.useCallback(() => {
-    void listWorkflows(ctx).then((items) => {
-      setWorkflows(items);
-      setActiveId((current) => {
-        if (current && items.some((item) => item.id === current)) return current;
-        return items[0]?.id ?? "";
-      });
-    });
-  }, [ctx]);
+  const offline = snapshot.channel === "offline";
 
-  React.useEffect(() => {
-    refreshWorkflows();
-  }, [refreshWorkflows]);
-
-  // 草稿是本次提交用的副本，改参数不动库里那份
+  // 选中文件：首次加载、切换、或该文件被外部改动时重载
   React.useEffect(() => {
     if (!activeId) {
-      setActive(null);
-      setDraft(null);
+      if (snapshot.workflows.length > 0) {
+        setActiveId(snapshot.workflows[0].path);
+      } else {
+        setActive(null);
+        setDraft(null);
+        setLoadError("");
+        setFileUpdated(false);
+        setDirty(false);
+      }
       return;
     }
+    const file = snapshot.workflows.find((item) => item.path === activeId);
+    if (!file) {
+      // 选中的文件已被删除：清空并回到自动选择
+      setActive(null);
+      setDraft(null);
+      setLoadError("");
+      setFileUpdated(false);
+      setDirty(false);
+      setActiveId(snapshot.workflows[0]?.path ?? "");
+      return;
+    }
+    // 已加载且文件没变：什么都不做（列表刷新时也不重载，避免丢草稿）
+    if (active && active.id === activeId && loadedModified === file.modified) return;
+    if (active && active.id === activeId && loadedModified !== file.modified) {
+      if (dirty) {
+        setFileUpdated(true);
+        return;
+      }
+      // 无本地改动，静默重载新内容
+    }
     let cancelled = false;
-    void loadWorkflow(ctx, activeId).then((loaded) => {
+    setLoadError("");
+    void runtime.loadWorkflow(file).then((result) => {
       if (cancelled) return;
-      setActive(loaded);
-      setDraft(loaded ? structuredClone(loaded.prompt) : null);
-      setSeedMode(new Set());
+      if (result.ok) {
+        setActive(result.workflow);
+        setDraft(structuredClone(result.workflow.prompt));
+        setSeedMode(new Set());
+        setLoadedModified(result.workflow.modified);
+        setDirty(false);
+        setFileUpdated(false);
+      } else {
+        setActive(null);
+        setDraft(null);
+        setLoadError(result.error);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [ctx, activeId]);
+  }, [activeId, snapshot.workflows, active, loadedModified, dirty, runtime]);
+
+  /** 手动重载：放弃本地参数改动，读回文件当前内容。 */
+  const reloadActive = React.useCallback(() => {
+    setDirty(false);
+    setFileUpdated(false);
+    setActive(null);
+  }, []);
 
   const fields = React.useMemo(
     () => (draft ? buildFields(draft, snapshot.objectInfo) : []),
@@ -206,6 +243,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   }, [draft]);
 
   const setFieldValue = React.useCallback((field: FieldSpec, raw: string | boolean) => {
+    setDirty(true);
     setDraft((current) => {
       if (!current) return current;
       return writeField(current, field.nodeId, field.input, coerceFieldValue(field, raw));
@@ -222,35 +260,36 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
     });
   }, []);
 
-  /** 读入文件内容到导入框（拖拽与文件选择共用），仍由用户点「导入」确认。 */
+  /** 读入文件内容到保存框（拖拽与文件选择共用），仍由用户点「保存」确认。 */
   const readJsonFile = React.useCallback((file: File) => {
-    setImportError("");
+    setSaveError("");
     void file
       .text()
-      .then(setImportText)
+      .then(setSaveText)
       .catch((err: unknown) =>
-        setImportError(`读取文件失败：${err instanceof Error ? err.message : String(err)}`),
+        setSaveError(`读取文件失败：${err instanceof Error ? err.message : String(err)}`),
       );
   }, []);
 
-  const doImport = React.useCallback(() => {
-    const checked = validateApiPrompt(importText);
-    if (!checked.ok || !checked.prompt) {
-      setImportError(checked.error ?? "导入失败");
-      return;
-    }
+  const doSave = React.useCallback(() => {
     setBusy(true);
-    void addWorkflow(ctx, checked.prompt)
-      .then((stored) => {
-        setImportOpen(false);
-        setImportText("");
-        setImportError("");
-        refreshWorkflows();
-        setActiveId(stored.id);
+    setSaveError("");
+    void runtime
+      .saveWorkflowFile(saveName, saveText)
+      .then((result) => {
+        if (!result.ok) {
+          setSaveError(result.error);
+          return;
+        }
+        setSaveOpen(false);
+        setSaveText("");
+        setSaveName("");
+        setSaveError("");
+        setActiveId(result.path);
       })
-      .catch((err: unknown) => setImportError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setSaveError(err instanceof Error ? err.message : String(err)))
       .finally(() => setBusy(false));
-  }, [ctx, importText, refreshWorkflows]);
+  }, [runtime, saveName, saveText]);
 
   const doRun = React.useCallback(() => {
     if (!draft || !active) return;
@@ -292,6 +331,8 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const progressValue =
     snapshot.progress && snapshot.progress.max > 0 ? snapshot.progress.value / snapshot.progress.max : 0;
   const previewed = previewKey ? snapshot.results.find((item) => item.key === previewKey) ?? null : null;
+  const saveTarget = saveOpen ? destWorkflowPath(saveName) : "";
+  const saveCollides = saveOpen && !!saveTarget && workflows.some((item) => item.path === saveTarget);
 
   return (
     <Panel
@@ -380,19 +421,24 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
           <Select
             value={activeId}
             onChange={setActiveId}
-            disabled={workflows.length === 0}
+            disabled={workflows.length === 0 || offline}
             options={
               workflows.length === 0
                 ? [{ value: "", label: "尚无工作流" }]
-                : workflows.map((item) => ({ value: item.id, label: item.name }))
+                : workflows.map((item) => ({ value: item.path, label: workflowDisplayName(item.path) }))
             }
             style={{ maxWidth: 260 }}
           />
-          <Button onClick={() => setImportOpen((open) => !open)}>
-            {importOpen ? "取消导入" : (
+          <Button
+            onClick={() => {
+              if (!saveOpen) setSaveName(active?.name ?? "");
+              setSaveOpen((open) => !open);
+            }}
+          >
+            {saveOpen ? "取消" : (
               <>
                 <UploadIcon size={12} />
-                导入工作流
+                保存为新文件
               </>
             )}
           </Button>
@@ -403,7 +449,26 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
           ) : null}
         </div>
 
-        {importOpen ? (
+        {fileUpdated ? (
+          <div style={{ margin: "0 10px 8px" }}>
+            <Notice tone="warn" onClose={() => setFileUpdated(false)}>
+              工作流文件已在编排界面更新；你正在调参的改动会被保留
+              <span style={{ display: "inline-flex", marginLeft: 8 }}>
+                <Button onClick={reloadActive}>重新载入</Button>
+              </span>
+            </Notice>
+          </div>
+        ) : null}
+
+        {loadError ? (
+          <div style={{ margin: "0 10px 8px" }}>
+            <Notice tone="error" onClose={() => setLoadError("")}>
+              {loadError}；该工作流请在编排界面打开
+            </Notice>
+          </div>
+        ) : null}
+
+        {saveOpen ? (
           <div
             onDragOver={(e: { preventDefault(): void }) => {
               e.preventDefault();
@@ -425,23 +490,36 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             }}
           >
             <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6, marginBottom: 6 }}>
-              粘贴 ComfyUI「工作流 → 导出（API）」的 JSON，参数表单由它生成。
+              把 JSON 保存为 ComfyUI 目录里的新工作流文件；粘贴或拖拽「导出（API）」的 JSON 即可。
             </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              <TextInput
+                value={saveName}
+                onChange={setSaveName}
+                placeholder="文件名（自动补 .json）"
+                style={{ flex: 1 }}
+              />
+            </div>
+            {saveCollides ? (
+              <div style={{ marginBottom: 6 }}>
+                <Notice tone="warn">同名文件已存在，保存将覆盖</Notice>
+              </div>
+            ) : null}
             <TextArea
-              value={importText}
-              onChange={setImportText}
+              value={saveText}
+              onChange={setSaveText}
               placeholder='{"3": {"class_type": "KSampler", "inputs": { ... }}}'
-              rows={6}
+              rows={5}
               mono
             />
-            {importError ? (
+            {saveError ? (
               <div style={{ marginTop: 6 }}>
-                <Notice tone="error">{importError}</Notice>
+                <Notice tone="error">{saveError}</Notice>
               </div>
             ) : null}
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              <Button tone="primary" onClick={doImport} disabled={busy || !importText.trim()}>
-                导入
+              <Button tone="primary" onClick={doSave} disabled={busy || !saveText.trim() || !saveName.trim()}>
+                保存
               </Button>
               <Button onClick={() => fileInputRef.current?.click()}>
                 <FolderIcon size={12} />
@@ -449,11 +527,6 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
               </Button>
               <span style={{ alignSelf: "center", fontSize: 11, color: textMuted }}>或拖拽 .json 到此处</span>
             </div>
-            {/*
-              用原生文件选择而不是Atelyx的系统对话框：对话框只返回路径，而工作流文件通常在仓库外，
-              插件的读取通道只服务仓库内相对路径（绝对路径会被拒），拿不到内容。
-              原生选择直接给出文件本体，读内容即可，与文件放在哪里无关。
-            */}
             <input
               ref={fileInputRef}
               type="file"
@@ -470,12 +543,42 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
         ) : null}
 
         {!draft ? (
-          <Empty hint="导入工作流后即可调参生成">
-            <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-              <UploadIcon size={22} />
-              {workflows.length === 0 ? "还没有工作流" : "工作流读取失败，请重新导入"}
-            </span>
-          </Empty>
+          offline ? (
+            <Empty hint="连接后自动发现 ComfyUI 目录里的工作流">
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <UploadIcon size={22} />
+                未连接
+              </span>
+            </Empty>
+          ) : snapshot.workflowsError ? (
+            <Empty hint="工作流列表来自 ComfyUI 目录接口">
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <UploadIcon size={22} />
+                {snapshot.workflowsError}
+              </span>
+            </Empty>
+          ) : workflows.length === 0 ? (
+            <Empty hint="在编排界面保存的工作流会自动出现在这里">
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <UploadIcon size={22} />
+                还没有工作流
+              </span>
+            </Empty>
+          ) : loadError ? (
+            <Empty hint="该工作流请在编排界面打开">
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <UploadIcon size={22} />
+                无法在生成面板使用
+              </span>
+            </Empty>
+          ) : (
+            <Empty hint="文件读取失败">
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <UploadIcon size={22} />
+                读取失败
+              </span>
+            </Empty>
+          )
         ) : (
           <>
             {countDisabledNodes(draft) > 0 ? (
@@ -507,7 +610,15 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                   style={{ paddingLeft: 26 }}
                 />
               </div>
-              <Button onClick={() => active && setDraft(structuredClone(active.prompt))}>重置</Button>
+              <Button
+                onClick={() => {
+                  if (!active) return;
+                  setDraft(structuredClone(active.prompt));
+                  setDirty(false);
+                }}
+              >
+                重置
+              </Button>
             </div>
 
             {visibleFields.length === 0 ? (

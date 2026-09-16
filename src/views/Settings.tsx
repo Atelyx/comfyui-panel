@@ -1,19 +1,15 @@
 /**
- * 设置页：连接、进程托管、结果落库与工作流库管理。
+ * 设置页：连接、进程托管、结果落库与工作流文件管理。
  *
  * 逐项改动即落盘（不设保存按钮）：改动都由用户明确操作触发，改完不丢比批量提交更符合直觉。
+ * 工作流清单来自 ComfyUI 用户目录（运行时轮询保持最新），重命名/删除直接作用于文件。
  */
 import React from "react";
 import type { AtelyxCtx } from "../ctx";
 import { DEFAULT_SETTINGS, saveSettings, type ComfySettings, type ProcessMode } from "../settings";
 import type { ComfyRuntime } from "../runtime";
 import type { HostController } from "../host/controller";
-import {
-  listWorkflows,
-  deleteWorkflow,
-  renameWorkflow,
-  type WorkflowSummary,
-} from "../workflow/library";
+import { workflowDisplayName } from "../workflow/files";
 import { Button, Card, Checkbox, ConfirmButton, Field, Notice, Select, TextArea, TextInput, textMuted, textPrimary, FONT_SM } from "./ui";
 
 interface SettingsProps {
@@ -24,23 +20,24 @@ interface SettingsProps {
   onSettingsChanged(settings: ComfySettings): void;
 }
 
+/** 文件大小展示（列表页不读文件正文，只有 size）。 */
+function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
 export function SettingsView(props: SettingsProps): unknown {
   const { ctx, runtime, host, onSettingsChanged } = props;
   const snapshot = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot);
   const hostSnapshot = React.useSyncExternalStore(host.subscribe, host.getSnapshot);
   const settings = snapshot.settings;
-  const [workflows, setWorkflows] = React.useState<WorkflowSummary[]>([]);
+  const workflows = snapshot.workflows;
+  const offline = snapshot.channel === "offline";
   const [renameId, setRenameId] = React.useState<string | null>(null);
   const [renameText, setRenameText] = React.useState("");
   const [dialogError, setDialogError] = React.useState("");
-
-  const refreshWorkflows = React.useCallback(() => {
-    void listWorkflows(ctx).then(setWorkflows);
-  }, [ctx]);
-
-  React.useEffect(() => {
-    refreshWorkflows();
-  }, [refreshWorkflows]);
 
   /** 改一项设置：本地立即生效（UI 无延迟），随后落盘。 */
   const patch = React.useCallback(
@@ -189,34 +186,38 @@ export function SettingsView(props: SettingsProps): unknown {
       </Card>
 
       <Card
-        title={`工作流库（${workflows.length}）`}
+        title={`工作流（${workflows.length}）`}
         actions={
           <div style={{ display: "flex", gap: 6 }}>
-            <Button onClick={refreshWorkflows}>刷新</Button>
+            <Button onClick={() => void runtime.refreshWorkflows()} disabled={offline}>
+              刷新
+            </Button>
             <ConfirmButton
               label="全部删除"
               confirmLabel={`确认删除全部 ${workflows.length} 个`}
-              disabled={workflows.length === 0}
+              disabled={workflows.length === 0 || offline}
               onConfirm={() =>
                 void (async () => {
-                  // 逐项删除以复用「正文与索引一并清理」的既有路径
-                  for (const item of workflows) await deleteWorkflow(ctx, item.id);
-                  refreshWorkflows();
+                  for (const item of workflows) await runtime.deleteWorkflowFile(item.path);
                 })()
               }
             />
           </div>
         }
       >
-        {workflows.length === 0 ? (
+        {offline ? (
+          <div style={{ color: textMuted, lineHeight: 1.6 }}>未连接：工作流文件由 ComfyUI 目录提供</div>
+        ) : snapshot.workflowsError ? (
+          <div style={{ color: textMuted, lineHeight: 1.6 }}>{snapshot.workflowsError}</div>
+        ) : workflows.length === 0 ? (
           <div style={{ color: textMuted, lineHeight: 1.6 }}>
-            还没有工作流；到生成面板导入「导出（API）」的 JSON
+            还没有工作流；在编排界面保存的工作流会自动出现在这里
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {workflows.map((item) => (
               <div
-                key={item.id}
+                key={item.path}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -226,15 +227,15 @@ export function SettingsView(props: SettingsProps): unknown {
                   border: `1px solid var(--border)`,
                 }}
               >
-                {renameId === item.id ? (
+                {renameId === item.path ? (
                   <>
                     <TextInput value={renameText} onChange={setRenameText} />
                     <Button
                       onClick={() => {
-                        void renameWorkflow(ctx, item.id, renameText).then(() => {
-                          setRenameId(null);
-                          refreshWorkflows();
-                        });
+                        void runtime
+                          .renameWorkflowFile(item.path, renameText)
+                          .then(() => setRenameId(null))
+                          .catch((err: unknown) => setDialogError(err instanceof Error ? err.message : String(err)));
                       }}
                     >
                       确定
@@ -245,16 +246,17 @@ export function SettingsView(props: SettingsProps): unknown {
                   <>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {item.name}
+                        {workflowDisplayName(item.path)}
                       </div>
                       <div style={{ fontSize: 11, color: textMuted }}>
-                        {item.nodeCount} 个节点 · {new Date(item.importedAt).toLocaleString()}
+                        {formatSize(item.size)} · {new Date(item.modified).toLocaleString()}
                       </div>
                     </div>
                     <Button
+                      disabled={offline}
                       onClick={() => {
-                        setRenameId(item.id);
-                        setRenameText(item.name);
+                        setRenameId(item.path);
+                        setRenameText(workflowDisplayName(item.path));
                       }}
                     >
                       重命名
@@ -262,7 +264,8 @@ export function SettingsView(props: SettingsProps): unknown {
                     <ConfirmButton
                       label="删除"
                       confirmLabel="确认删除"
-                      onConfirm={() => void deleteWorkflow(ctx, item.id).then(refreshWorkflows)}
+                      disabled={offline}
+                      onConfirm={() => void runtime.deleteWorkflowFile(item.path)}
                     />
                   </>
                 )}

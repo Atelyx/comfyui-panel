@@ -23,6 +23,16 @@ import type {
   SystemStats,
 } from "./comfy/types";
 import { baseUrl, type ComfySettings } from "./settings";
+import {
+  listWorkflows,
+  loadWorkflow as loadWorkflowFromLibrary,
+  saveWorkflowAsFile as saveWorkflowFileToLibrary,
+  renameWorkflow as renameWorkflowInLibrary,
+  deleteWorkflow as deleteWorkflowInLibrary,
+  type LoadWorkflowResult,
+  type SaveWorkflowResult,
+} from "./workflow/library";
+import { diffWorkflows, type WorkflowFileInfo } from "./workflow/files";
 
 /** 一条生成结果（历史里的一张图）。 */
 export interface ResultImage {
@@ -55,10 +65,16 @@ export interface RuntimeSnapshot {
   /** 最近的在前。 */
   results: ResultImage[];
   objectInfo: ObjectInfoMap | null;
+  /** ComfyUI 工作流目录里的文件（含 mtime），编排界面保存后秒级刷新。 */
+  workflows: WorkflowFileInfo[];
+  /** 列表读取失败（如旧版 ComfyUI 无 userdata 接口）时的原因。 */
+  workflowsError: string;
 }
 
 /** 长连接主导进度，轮询只补队列与历史。 */
 const QUEUE_POLL_MS = 2000;
+/** 工作流目录轮询：编排界面保存后几秒内感知，不必追求瞬时。 */
+const WORKFLOW_POLL_MS = 3000;
 /** 画廊保留上限。 */
 const MAX_RESULTS = 80;
 /** 首屏回填条数。 */
@@ -79,6 +95,7 @@ export class ComfyRuntime {
   private socket: ComfySocket | null = null;
   private clientId: string;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private workflowPollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly listeners = new Set<() => void>();
   private snap: RuntimeSnapshot;
   /** 已折进画廊的任务 id，避免轮询重复展开。 */
@@ -101,6 +118,8 @@ export class ComfyRuntime {
       error: "",
       results: [],
       objectInfo: null,
+      workflows: [],
+      workflowsError: "",
     };
   }
 
@@ -141,6 +160,7 @@ export class ComfyRuntime {
     await this.refreshQueue();
     await this.refreshHistory();
     this.startPolling();
+    this.startWorkflowPolling();
     this.startSocket();
     // 节点定义体积较大，闲时取一次，不阻塞上面的首屏数据
     void this.loadObjectInfo();
@@ -157,6 +177,10 @@ export class ComfyRuntime {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.workflowPollTimer !== null) {
+      clearInterval(this.workflowPollTimer);
+      this.workflowPollTimer = null;
+    }
     if (this.socket) {
       this.socket.close();
       this.socket = null;
@@ -170,6 +194,59 @@ export class ComfyRuntime {
       void this.refreshQueue();
       void this.refreshHistory();
     }, QUEUE_POLL_MS);
+  }
+
+  private startWorkflowPolling(): void {
+    if (this.workflowPollTimer !== null) return;
+    void this.refreshWorkflows();
+    this.workflowPollTimer = setInterval(() => {
+      void this.refreshWorkflows();
+    }, WORKFLOW_POLL_MS);
+  }
+
+  /**
+   * 拉取工作流目录列表并与上次对比，有变化才通知订阅方。
+   * 只读 mtime/size，不读文件正文；失败（如旧版 ComfyUI 无 userdata 接口）记入 workflowsError。
+   */
+  async refreshWorkflows(): Promise<void> {
+    try {
+      const files = await listWorkflows(this.client);
+      const previous = new Map(this.snap.workflows.map((file) => [file.path, file]));
+      const { changed, removed } = diffWorkflows(previous, files);
+      const anyChange = changed.length > 0 || removed.length > 0;
+      if (!anyChange && files.length === previous.size) {
+        if (this.snap.workflowsError) this.emit({ workflowsError: "" });
+        return;
+      }
+      this.emit({ workflows: files, workflowsError: "" });
+    } catch (err) {
+      const message = describe(err);
+      if (message !== this.snap.workflowsError) this.emit({ workflowsError: message });
+    }
+  }
+
+  /** 读取并归一化一个工作流文件为可提交的 prompt。 */
+  loadWorkflow(file: WorkflowFileInfo): Promise<LoadWorkflowResult> {
+    return loadWorkflowFromLibrary(this.client, file);
+  }
+
+  /** 保存为新文件（覆盖同名），成功后立即刷新列表。 */
+  async saveWorkflowFile(name: string, content: string): Promise<SaveWorkflowResult> {
+    const result = await saveWorkflowFileToLibrary(this.client, name, content);
+    if (result.ok) void this.refreshWorkflows();
+    return result;
+  }
+
+  /** 重命名文件，成功后立即刷新列表。 */
+  async renameWorkflowFile(path: string, newName: string): Promise<void> {
+    await renameWorkflowInLibrary(this.client, path, newName);
+    void this.refreshWorkflows();
+  }
+
+  /** 删除文件，成功后立即刷新列表。 */
+  async deleteWorkflowFile(path: string): Promise<void> {
+    await deleteWorkflowInLibrary(this.client, path);
+    void this.refreshWorkflows();
   }
 
   private startSocket(): void {

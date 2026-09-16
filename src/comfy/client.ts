@@ -8,8 +8,9 @@ import type {
   PromptSubmitResult,
   QueueSnapshot,
   SystemStats,
+  UserDataEntry,
 } from "./types";
-import type { ComfyTransport } from "./transport";
+import type { ComfyTransport, RequestOptions } from "./transport";
 
 /** 服务端的错误体（提交校验失败时含 error 与逐节点报错）。 */
 interface ErrorBody {
@@ -146,5 +147,63 @@ export class ComfyClient {
       subfolder: data.subfolder ?? subfolder,
       type: data.type ?? "input",
     };
+  }
+
+  /**
+   * userdata 系列：读写的是 ComfyUI 用户目录下的文件（工作流存在 `workflows/` 下）。
+   * `path` 是相对当前用户目录的路径，`/userdata` 接口按它定位文件。
+   */
+
+  /**
+   * 路径整体编码（斜杠也编码成 %2F）：与 ComfyUI 前端一致，服务端收到后先 unquote 还原，
+   * 因此 `{file}` 单段路由也能命中多段路径。逐段编码保留 `/` 反而会匹配不上。
+   */
+  private static encodePath(path: string): string {
+    return encodeURIComponent(path);
+  }
+
+  private async userdataRequest(path: string, opts: RequestOptions = {}): Promise<string> {
+    const res = await this.transport.request(path, opts);
+    if (res.status !== 200 && res.status !== 204) throw new Error(extractError(res.status, res.body));
+    return res.body;
+  }
+
+  /** 列用户目录（`full_info` 返回 path/size/modified/created，modified 为毫秒）。 */
+  async listUserDir(dir: string): Promise<UserDataEntry[]> {
+    const params = new URLSearchParams({ dir, recurse: "true", full_info: "true" });
+    const body = await this.userdataRequest(`/userdata?${params.toString()}`);
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      return Array.isArray(parsed) ? (parsed as UserDataEntry[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** 读用户文件原文（工作流 JSON 的读取通道）。 */
+  readUserFile(path: string): Promise<string> {
+    return this.userdataRequest(`/userdata/${ComfyClient.encodePath(path)}`);
+  }
+
+  /** 写入用户文件：正文原样落盘，`overwrite` 默认 true，父目录自动创建。 */
+  async writeUserFile(path: string, content: string): Promise<void> {
+    await this.userdataRequest(`/userdata/${ComfyClient.encodePath(path)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: content,
+    });
+  }
+
+  /** 删除用户文件。 */
+  async deleteUserFile(path: string): Promise<void> {
+    await this.userdataRequest(`/userdata/${ComfyClient.encodePath(path)}`, { method: "DELETE" });
+  }
+
+  /** 移动/重命名用户文件。 */
+  async moveUserFile(path: string, dest: string): Promise<void> {
+    await this.userdataRequest(
+      `/userdata/${ComfyClient.encodePath(path)}/move/${ComfyClient.encodePath(dest)}`,
+      { method: "POST" },
+    );
   }
 }

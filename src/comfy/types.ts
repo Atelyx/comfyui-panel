@@ -143,3 +143,14 @@ export interface ImageRef {
   subfolder: string;
   type: string;
 }
+
+/**
+ * userdata 目录列表条目（`GET /userdata?dir=...&full_info=true`）。
+ * `path` 相对当前用户目录（如 `workflows/xx.json`）；`modified` 为毫秒时间戳。
+ */
+export interface UserDataEntry {
+  path: string;
+  size: number;
+  modified: number;
+  created: number;
+}

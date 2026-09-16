@@ -1,28 +1,38 @@
 /**
- * 工作流库：导入、校验与持久化 API 格式工作流。
+ * 工作流库：文件即工作流，库的清单就是 ComfyUI 用户目录里的工作流文件。
  *
- * 为什么只收 API 格式：接口只接受「节点 id → {class_type, inputs}」，而本工具默认导出的是
- * 界面格式（含节点位置、连线、子图），服务端没有转换通道。自行把界面格式编译成接口格式要处理
- * 子图展平、控件值到输入名的映射、跳过/禁用语义，在自定义节点上极易出错；要求用户导出后再导入，
- * 换来的是提交的那张图正是用户在 ComfyUI 里验证过的。
- *
- * 正文与索引分开存：列表页不必把全部工作流正文读进内存。
+ * 列表来自 `/userdata` 目录接口；读文件时按格式分派——API 格式直接校验使用，
+ * UI 格式经 `convertUiToApi` 转换（规则照搬 ComfyUI 前端）。转换失败的文件仍可列出，
+ * 由界面提示用户在编排界面打开，不产出错位的 prompt。
  */
-import type { AtelyxCtx } from "../ctx";
-import type { ApiNode, ApiPrompt } from "../comfy/types";
+import type { ComfyClient } from "../comfy/client";
+import type { ApiPrompt } from "../comfy/types";
+import { isApiFormat, convertUiToApi } from "./convert";
+import {
+  deleteWorkflowFile,
+  destWorkflowPath,
+  listWorkflowFiles,
+  readWorkflowFile,
+  renameWorkflowFile,
+  writeWorkflowFile,
+  type WorkflowFileInfo,
+} from "./files";
 
-const INDEX_KEY = "wf-index";
-const ITEM_PREFIX = "wf:";
+/** 加载结果：转换/校验失败时给出可展示的原因。 */
+export type LoadWorkflowResult =
+  | { ok: true; workflow: StoredWorkflow }
+  | { ok: false; error: string };
 
-/** 列表项（不含正文）。 */
-export interface WorkflowSummary {
+/** 保存结果。 */
+export type SaveWorkflowResult = { ok: true; path: string } | { ok: false; error: string };
+
+/** 已加载的工作流：prompt 是可直接提交的 API 格式。 */
+export interface StoredWorkflow {
+  /** 文件相对路径（`workflows/xx.json`）。 */
   id: string;
   name: string;
-  importedAt: number;
-  nodeCount: number;
-}
-
-export interface StoredWorkflow extends WorkflowSummary {
+  /** 加载时刻的 mtime，界面据此判断文件是否在编排界面被改过。 */
+  modified: number;
   prompt: ApiPrompt;
 }
 
@@ -33,16 +43,103 @@ export interface ValidationResult {
   prompt?: ApiPrompt;
 }
 
-/** 十六进制 id：无路径语义，也不需要引 uuid 依赖。 */
-function newId(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+/** 列表（含 mtime），文件名排序。 */
+export async function listWorkflows(client: ComfyClient): Promise<WorkflowFileInfo[]> {
+  return listWorkflowFiles(client);
+}
+
+/**
+ * 读文件并归一化出可提交的 prompt。
+ * `file` 来自列表（含 mtime，回填到结果供界面做外部修改检测）；
+ * 文件内容是 API 格式则校验后直接使用，是 UI 格式则转换。
+ */
+export async function loadWorkflow(client: ComfyClient, file: WorkflowFileInfo): Promise<LoadWorkflowResult> {
+  let raw: unknown;
+  try {
+    const text = await readWorkflowFile(client, file.path);
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      return { ok: false, error: `文件不是合法 JSON：${err instanceof Error ? err.message : String(err)}` };
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  let prompt: ApiPrompt;
+  if (isApiFormat(raw)) {
+    const checked = validateApiPrompt(raw);
+    if (!checked.ok || !checked.prompt) {
+      return { ok: false, error: checked.error ?? "API 格式校验失败" };
+    }
+    prompt = checked.prompt;
+  } else {
+    const converted = convertUiToApi(raw);
+    if (!converted.ok) return { ok: false, error: converted.error };
+    prompt = converted.prompt;
+  }
+
+  return {
+    ok: true,
+    workflow: {
+      id: file.path,
+      name: file.name.replace(/\.json$/i, ""),
+      modified: file.modified,
+      prompt,
+    },
+  };
+}
+
+/**
+ * 把内容保存成工作流目录下的新文件（覆盖同名文件）。
+ * 内容须是可识别的 JSON（API 或 UI 格式），文件名由调用方给定。
+ */
+export async function saveWorkflowAsFile(
+  client: ComfyClient,
+  name: string,
+  content: string,
+): Promise<SaveWorkflowResult> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    return { ok: false, error: `不是合法 JSON：${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!isApiFormat(parsed) && !looksLikeUiWorkflow(parsed)) {
+    return { ok: false, error: "无法识别工作流格式：既不是 API 格式（节点 id → {class_type}），也不是 UI 格式（含 nodes 数组）" };
+  }
+  const path = destWorkflowPath(name);
+  try {
+    await writeWorkflowFile(client, path, content);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return { ok: true, path };
+}
+
+/** 重命名文件（ComfyUI 侧 move）。 */
+export async function renameWorkflow(client: ComfyClient, path: string, newName: string): Promise<void> {
+  await renameWorkflowFile(client, path, newName);
+}
+
+/** 删除文件。 */
+export async function deleteWorkflow(client: ComfyClient, path: string): Promise<void> {
+  await deleteWorkflowFile(client, path);
+}
+
+/** 导出为可直接分享的 JSON 文本。 */
+export function exportWorkflow(workflow: StoredWorkflow): string {
+  return JSON.stringify(workflow.prompt, null, 2);
+}
+
+/** UI 格式的粗判：顶层有 nodes 数组。 */
+function looksLikeUiWorkflow(raw: unknown): boolean {
+  return !!raw && typeof raw === "object" && !Array.isArray(raw)
+    && Array.isArray((raw as Record<string, unknown>).nodes);
 }
 
 /**
  * 校验并归一化一份 API 格式工作流。
- *
  * 只做结构性校验，不检查节点类型是否存在：那取决于用户装了哪些自定义节点，
  * 交给服务端在提交时给出准确报错（它还会指出缺哪个节点）。
  */
@@ -62,13 +159,6 @@ export function validateApiPrompt(raw: unknown): ValidationResult {
   const ids = Object.keys(record);
   if (ids.length === 0) {
     return { ok: false, error: "工作流是空的" };
-  }
-  // 界面格式被误当接口格式导入时，给出可操作的指引而不是说「形状不对」
-  if ("nodes" in record && Array.isArray(record.nodes)) {
-    return {
-      ok: false,
-      error: "这是 UI 格式工作流。请在 ComfyUI 里用「工作流 → 导出（API）」导出后再导入",
-    };
   }
   const prompt: ApiPrompt = {};
   let withClassType = 0;
@@ -90,148 +180,11 @@ export function validateApiPrompt(raw: unknown): ValidationResult {
     prompt[id] = {
       class_type: classType,
       inputs: (inputs as Record<string, unknown> | undefined) ?? {},
-      ...(entry._meta ? { _meta: entry._meta as ApiNode["_meta"] } : {}),
+      ...(entry._meta ? { _meta: entry._meta as ApiPrompt[string]["_meta"] } : {}),
     };
   }
   if (withClassType === 0) {
     return { ok: false, error: "没有任何带 class_type 的节点——看起来不是 API 格式工作流" };
   }
   return { ok: true, prompt };
-}
-
-async function readIndex(ctx: AtelyxCtx): Promise<WorkflowSummary[]> {
-  try {
-    const raw = await ctx.storage.get(INDEX_KEY);
-    if (!Array.isArray(raw)) return [];
-    // 索引虽由本插件写入，仍收敛一次形状（手改可能留下脏项）
-    return raw.flatMap((item): WorkflowSummary[] => {
-      if (!item || typeof item !== "object") return [];
-      const row = item as Record<string, unknown>;
-      if (typeof row.id !== "string" || typeof row.name !== "string") return [];
-      return [
-        {
-          id: row.id,
-          name: row.name,
-          importedAt: typeof row.importedAt === "number" ? row.importedAt : 0,
-          nodeCount: typeof row.nodeCount === "number" ? row.nodeCount : 0,
-        },
-      ];
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function writeIndex(ctx: AtelyxCtx, index: WorkflowSummary[]): Promise<void> {
-  await ctx.storage.set(INDEX_KEY, index);
-}
-
-/** 按导入时间倒序列出。 */
-export async function listWorkflows(ctx: AtelyxCtx): Promise<WorkflowSummary[]> {
-  const index = await readIndex(ctx);
-  return index.sort((a, b) => b.importedAt - a.importedAt);
-}
-
-/** 读正文，不存在返回 null。 */
-export async function loadWorkflow(ctx: AtelyxCtx, id: string): Promise<StoredWorkflow | null> {
-  try {
-    const raw = await ctx.storage.get(`${ITEM_PREFIX}${id}`);
-    if (!raw || typeof raw !== "object") return null;
-    const row = raw as Record<string, unknown>;
-    const checked = validateApiPrompt(row.prompt);
-    if (!checked.ok || !checked.prompt) return null;
-    return {
-      id,
-      name: typeof row.name === "string" ? row.name : id,
-      importedAt: typeof row.importedAt === "number" ? row.importedAt : 0,
-      nodeCount: Object.keys(checked.prompt).length,
-      prompt: checked.prompt,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** 未给名字时按节点构成自动起名。 */
-export async function addWorkflow(
-  ctx: AtelyxCtx,
-  prompt: ApiPrompt,
-  name?: string,
-): Promise<StoredWorkflow> {
-  const id = newId();
-  const resolvedName = (name ?? "").trim() || suggestName(prompt);
-  const stored: StoredWorkflow = {
-    id,
-    name: resolvedName,
-    importedAt: Date.now(),
-    nodeCount: Object.keys(prompt).length,
-    prompt,
-  };
-  await ctx.storage.set(`${ITEM_PREFIX}${id}`, {
-    id: stored.id,
-    name: stored.name,
-    importedAt: stored.importedAt,
-    prompt: stored.prompt,
-  });
-  const index = await readIndex(ctx);
-  index.push({
-    id: stored.id,
-    name: stored.name,
-    importedAt: stored.importedAt,
-    nodeCount: stored.nodeCount,
-  });
-  await writeIndex(ctx, index);
-  return stored;
-}
-
-export async function renameWorkflow(ctx: AtelyxCtx, id: string, name: string): Promise<void> {
-  const trimmed = name.trim();
-  if (!trimmed) return;
-  const stored = await loadWorkflow(ctx, id);
-  if (!stored) return;
-  await ctx.storage.set(`${ITEM_PREFIX}${id}`, {
-    id: stored.id,
-    name: trimmed,
-    importedAt: stored.importedAt,
-    prompt: stored.prompt,
-  });
-  const index = await readIndex(ctx);
-  await writeIndex(
-    ctx,
-    index.map((item) => (item.id === id ? { ...item, name: trimmed } : item)),
-  );
-}
-
-/** 正文与索引一并清掉，避免索引里留悬空项。 */
-export async function deleteWorkflow(ctx: AtelyxCtx, id: string): Promise<void> {
-  await ctx.storage.delete(`${ITEM_PREFIX}${id}`);
-  const index = await readIndex(ctx);
-  await writeIndex(
-    ctx,
-    index.filter((item) => item.id !== id),
-  );
-}
-
-/** 导出为可直接分享的 JSON 文本。 */
-export function exportWorkflow(workflow: StoredWorkflow): string {
-  return JSON.stringify(workflow.prompt, null, 2);
-}
-
-/** 从节点构成里挑关键词起名：一排「工作流 1/2/3」用户无从分辨，类名天然可区分。 */
-function suggestName(prompt: ApiPrompt): string {
-  const classTypes = Object.values(prompt).map((node) => node.class_type);
-  const priority = [
-    "KSampler",
-    "KSamplerAdvanced",
-    "SamplerCustom",
-    "QwenMultiangleCameraNode",
-    "TextEncodeQwenImageEditPlus",
-    "CheckpointLoaderSimple",
-    "UNETLoader",
-    "LoaderGGUF",
-    "VAEDecode",
-  ];
-  const picked = priority.filter((name) => classTypes.includes(name)).slice(0, 2);
-  const label = picked.length > 0 ? picked.join(" + ") : (classTypes[0] ?? "工作流");
-  return `${label}`;
 }

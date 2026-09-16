@@ -64,13 +64,6 @@ export interface AtelyxCtx extends Context {
     read(): Promise<unknown>;
     write(data: unknown): Promise<void>;
   };
-  storage: {
-    get(key: string): Promise<unknown>;
-    set(key: string, value: unknown): Promise<void>;
-    delete(key: string): Promise<void>;
-    keys(): Promise<string[]>;
-    clear(): Promise<void>;
-  };
   shell: {
     /** 启动长驻进程并立即拿到句柄（不等进程结束）。 */
     spawn(
