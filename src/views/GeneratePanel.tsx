@@ -142,29 +142,34 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
     );
   }, [fields, filter]);
 
-  /** 置顶的常用参数（提示词/种子/采样/尺寸），带节点标题作区分。 */
-  const commonFields = React.useMemo(
-    () => visibleFields.filter(isCommonField),
-    [visibleFields],
-  );
-
-  /** 其余字段按节点分组，便于用户对上 ComfyUI 里的节点。 */
+  /**
+   * 按节点分组（含全部字段）。卡片内常用参数排前；含常用参数的节点排前且默认展开，
+   * 其余折叠——重要参数无需滚动即可见，又不重复展示同一节点。
+   */
   const nodeGroups = React.useMemo(() => {
     const map = new Map<string, FieldSpec[]>();
     for (const field of visibleFields) {
-      if (isCommonField(field)) continue;
       const list = map.get(field.nodeId) ?? [];
       list.push(field);
       map.set(field.nodeId, list);
     }
-    return Array.from(map.entries());
+    const groups = Array.from(map.entries());
+    for (const [, list] of groups) {
+      list.sort((a, b) => Number(isCommonField(b)) - Number(isCommonField(a)));
+    }
+    const hasCommon = (group: [string, FieldSpec[]]): boolean => group[1].some(isCommonField);
+    return groups.sort((a, b) => Number(hasCommon(b)) - Number(hasCommon(a)));
   }, [visibleFields]);
 
-  // 换工作流时把非常用节点默认折叠，只铺开常用参数；筛选时忽略折叠态
+  // 换工作流时：不含常用参数的节点默认折叠，含常用参数的铺开；筛选时忽略折叠态
   React.useEffect(() => {
+    const hasCommon = new Set<string>();
+    for (const field of fields) {
+      if (isCommonField(field)) hasCommon.add(field.nodeId);
+    }
     const ids = new Set<string>();
     for (const field of fields) {
-      if (!isCommonField(field)) ids.add(field.nodeId);
+      if (!hasCommon.has(field.nodeId)) ids.add(field.nodeId);
     }
     setCollapsed(ids);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -519,52 +524,29 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 </span>
               </Empty>
             ) : (
-              <>
-                {commonFields.length > 0 ? (
-                  <div style={{ marginBottom: 4 }}>
-                    <SectionTitle>常用参数</SectionTitle>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "0 10px 8px" }}>
-                      {commonFields.map((field) => (
-                        <FieldRow
-                          key={fieldKey(field)}
-                          field={field}
-                          showNode
-                          value={readField(draft, field)}
-                          seedChecked={seedMode.has(fieldKey(field))}
-                          onToggleSeed={() => toggleSeed(field)}
-                          onChange={(raw) => setFieldValue(field, raw)}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {nodeGroups.length > 0 ? (
-                  <div style={{ padding: "0 10px" }}>
-                    {nodeGroups.map(([nodeId, nodeFields]) => (
-                      <CollapseCard
-                        key={nodeId}
-                        title={nodeFields[0]?.nodeLabel ?? nodeId}
-                        subtitle={nodeFields[0]?.classType ?? ""}
-                        badge={`${nodeFields.length} 字段`}
-                        open={hasFilter || !collapsed.has(nodeId)}
-                        onToggle={() => toggleCollapsed(nodeId)}
-                      >
-                        {nodeFields.map((field) => (
-                          <FieldRow
-                            key={fieldKey(field)}
-                            field={field}
-                            value={readField(draft, field)}
-                            seedChecked={seedMode.has(fieldKey(field))}
-                            onToggleSeed={() => toggleSeed(field)}
-                            onChange={(raw) => setFieldValue(field, raw)}
-                          />
-                        ))}
-                      </CollapseCard>
+              <div style={{ padding: "0 10px" }}>
+                {nodeGroups.map(([nodeId, nodeFields]) => (
+                  <CollapseCard
+                    key={nodeId}
+                    title={nodeFields[0]?.nodeLabel ?? nodeId}
+                    subtitle={nodeFields[0]?.classType ?? ""}
+                    badge={`${nodeFields.length} 字段`}
+                    open={hasFilter || !collapsed.has(nodeId)}
+                    onToggle={() => toggleCollapsed(nodeId)}
+                  >
+                    {nodeFields.map((field) => (
+                      <FieldRow
+                        key={fieldKey(field)}
+                        field={field}
+                        value={readField(draft, field)}
+                        seedChecked={seedMode.has(fieldKey(field))}
+                        onToggleSeed={() => toggleSeed(field)}
+                        onChange={(raw) => setFieldValue(field, raw)}
+                      />
                     ))}
-                  </div>
-                ) : null}
-              </>
+                  </CollapseCard>
+                ))}
+              </div>
             )}
           </>
         )}
@@ -662,44 +644,26 @@ function FieldRow(props: {
   field: FieldSpec;
   value: unknown;
   seedChecked: boolean;
-  /** 常用参数区需要带上节点名作区分。 */
-  showNode?: boolean;
   onToggleSeed: () => void;
   onChange: (raw: string | boolean) => void;
 }): unknown {
   const { field, value } = props;
   const label = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-        <span
-          style={{
-            fontSize: 11,
-            color: textSecondary,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-          title={`${field.nodeId}.${field.input}`}
-        >
-          {fieldLabel(field)}
-        </span>
-        {field.isSeed ? (
-          <Checkbox checked={props.seedChecked} onChange={props.onToggleSeed} label="每次随机" title="每次生成时换一个新种子" />
-        ) : null}
-      </div>
-      {props.showNode ? (
-        <span
-          style={{
-            fontSize: 10,
-            color: textMuted,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-          title={field.nodeLabel}
-        >
-          {field.nodeLabel}
-        </span>
+    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+      <span
+        style={{
+          fontSize: 11,
+          color: textSecondary,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+        title={`${field.nodeId}.${field.input}`}
+      >
+        {fieldLabel(field)}
+      </span>
+      {field.isSeed ? (
+        <Checkbox checked={props.seedChecked} onChange={props.onToggleSeed} label="每次随机" title="每次生成时换一个新种子" />
       ) : null}
     </div>
   );
