@@ -26,6 +26,8 @@ export interface HostSnapshot {
 const MAX_LOGS = 300;
 /** 加载大模型或首次编译会慢，给足时间但不无限等。 */
 const READY_TIMEOUT_MS = 180000;
+/** 错误输出可能极长（Python traceback 单行也能几十 KB），进通知与快照前截断。 */
+const ERROR_DETAIL_MAX = 200;
 
 /** 启动请求的可选来源信息（远程启动据此注入参数并标明发起方）。 */
 export interface StartRequest {
@@ -52,6 +54,14 @@ export class HostController {
   private platform: Platform | null = null;
   /** 本插件启动的进程句柄；停止与「是否在运行」都依它判断。 */
   private handle: ShellProcessHandle | null = null;
+  /** 等待就绪期间进程退出或出错的原因；非空即终止等待，不再空等满超时。 */
+  private died = "";
+  /** 最后一条非空错误输出：进程没打印可读原因时，它就是最接近现场的信息。 */
+  private lastStderr = "";
+  /** 本次启动是否已弹过失败通知：spawn 失败会同时走 error 回调与 reject，只通知一次。 */
+  private notified = false;
+  /** 本次启动是否被用户主动停止：收场同样是进程退出，但不是失败。 */
+  private cancelled = false;
 
   constructor(ctx: AtelyxCtx, settings: ComfySettings) {
     this.ctx = ctx;
@@ -95,8 +105,12 @@ export class HostController {
     const started = Date.now();
     let lastHeartbeat = 0;
     for (;;) {
+      // 进程已退出就等不到服务，立刻定论——由调用方按 died 给出失败原因
+      if (this.died) return false;
       await runtime.connect();
       if (runtime.getSnapshot().channel === "direct") return true;
+      // 探测期间退出：这一轮也白等
+      if (this.died) return false;
       const elapsed = Date.now() - started;
       if (elapsed >= READY_TIMEOUT_MS) return false;
       // 加载模型与首次编译可能耗时数十秒，定期留个心跳，让用户看到还在等
@@ -108,6 +122,28 @@ export class HostController {
     }
   }
 
+  /** 启动失败弹一条宿主通知：面板不可见（如远程发起）时也能知道结果与原因。 */
+  private notifyFailure(message: string): void {
+    if (this.notified) return;
+    this.notified = true;
+    try {
+      this.ctx.notification.notify({ level: "error", title: "ComfyUI 启动失败", message });
+    } catch {
+      // 通知通道异常不改变「启动失败」这个结论
+    }
+  }
+
+  /** 启动未就绪的收口：写失败原因并弹通知。用户主动停止以同样的进程退出收场，但那不是失败。 */
+  private failStart(died: string): void {
+    if (this.cancelled) {
+      this.emit({ starting: false });
+      return;
+    }
+    const message = died || `启动后 ${Math.round(READY_TIMEOUT_MS / 1000)}s 内服务未就绪`;
+    this.emit({ starting: false, error: message });
+    this.notifyFailure(message);
+  }
+
   /**
    * 启动 ComfyUI 并等待服务就绪。
    *
@@ -116,11 +152,17 @@ export class HostController {
    */
   async start(runtime: ComfyRuntime, request: StartRequest = {}): Promise<boolean> {
     if (this.snap.starting || this.handle) return false;
+    this.died = "";
+    this.lastStderr = "";
+    this.notified = false;
+    this.cancelled = false;
     let line: string;
     try {
       line = describeStartCommand(this.settings, request.extraTokens);
     } catch (err) {
-      this.emit({ error: describe(err) });
+      const message = describe(err);
+      this.emit({ error: message });
+      this.notifyFailure(message);
       return false;
     }
     this.emit({ starting: true, error: "", startLine: line, logs: [] });
@@ -128,35 +170,51 @@ export class HostController {
     this.log(`$ ${line}`);
 
     try {
-      this.handle = await startComfy(this.ctx, await this.getPlatform(), this.settings, {
+      const handle = await startComfy(this.ctx, await this.getPlatform(), this.settings, {
         extraTokens: request.extraTokens,
-        onLog: (text, stream) => this.log(text, stream),
+        onLog: (text, stream) => {
+          if (stream === "stderr" && text.trim()) this.lastStderr = text.trim();
+          this.log(text, stream);
+        },
         onExit: (code) => {
-          // 无论就绪前后退出，对界面而言都是「进程不在了」
+          // 无论就绪前后退出，对界面而言都是「进程不在了」；starting 归 start() 收口
           this.handle = null;
-          this.emit({ running: false, starting: false });
+          const detail = this.lastStderr ? `：${truncate(this.lastStderr, ERROR_DETAIL_MAX)}` : "";
+          this.died = `进程已退出（退出码 ${code ?? "未知"}）${detail}`;
+          this.emit({ running: false });
           this.log(`进程已退出（退出码 ${code ?? "未知"}）`, "stderr");
         },
         onError: (message) => {
           this.handle = null;
-          this.emit({ starting: false, running: false, error: message });
+          this.died = message;
+          // 启动阶段由 start() 统一收口；就绪后出错没有这一步，直接落进快照
+          if (this.snap.starting) this.emit({ running: false });
+          else this.emit({ running: false, error: message });
           this.log(message, "stderr");
         },
       });
+      // 句柄落地前进程就已退出：onExit 已记下原因，这里不能再把句柄写回去
+      if (this.died) {
+        this.failStart(this.died);
+        return false;
+      }
+      this.handle = handle;
       this.emit({ running: true });
     } catch (err) {
-      this.emit({ starting: false, error: describe(err) });
+      this.failStart(describe(err));
       return false;
     }
 
     const ready = await this.waitReady(runtime);
-    this.emit({ starting: false });
-    if (!ready) this.emit({ error: `启动后 ${Math.round(READY_TIMEOUT_MS / 1000)}s 内服务未就绪，请查看下方日志` });
+    if (ready) this.emit({ starting: false });
+    else this.failStart(this.died);
     return ready;
   }
 
   /** 停止本插件启动的进程（结束整棵进程树，不给服务留孤儿）。 */
   async stop(): Promise<void> {
+    // 等就绪期间用户叫停：别让 start() 把这次退出当成启动失败
+    if (this.snap.starting) this.cancelled = true;
     const handle = this.handle;
     if (!handle) {
       this.emit({ running: false, starting: false });
@@ -176,4 +234,8 @@ export class HostController {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }

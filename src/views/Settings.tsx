@@ -9,7 +9,7 @@ import type { AtelyxCtx } from "../ctx";
 import { DEFAULT_SETTINGS, saveSettings, type ComfySettings, type ProcessMode } from "../settings";
 import type { ComfyRuntime } from "../runtime";
 import type { HostController } from "../host/controller";
-import { Button, Card, Checkbox, Field, Notice, Select, TextArea, TextInput, textMuted, textPrimary, FONT_SM } from "./ui";
+import { Button, Card, Checkbox, Field, Notice, Select, TextInput, textMuted, textPrimary, FONT_SM } from "./ui";
 
 interface SettingsProps {
   ctx: AtelyxCtx;
@@ -203,27 +203,6 @@ export function SettingsView(props: SettingsProps): unknown {
       <div style={{ color: textMuted, fontSize: 11, lineHeight: 1.6 }}>
         默认：{DEFAULT_SETTINGS.host}:{DEFAULT_SETTINGS.port}
       </div>
-    </div>
-  );
-}
-
-/** 面板与设置页共用同一份日志。 */
-export function HostLog(props: { host: HostController; rows?: number }): unknown {
-  const snapshot = React.useSyncExternalStore(props.host.subscribe, props.host.getSnapshot);
-  const rows = props.rows ?? 8;
-  if (snapshot.logs.length === 0) return null;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 11, color: textMuted }}>运行日志</span>
-        <Button onClick={() => props.host.clearLogs()}>清空</Button>
-      </div>
-      <TextArea
-        value={snapshot.logs.slice(-rows).join("\n")}
-        onChange={() => undefined}
-        rows={rows}
-        mono
-      />
     </div>
   );
 }
