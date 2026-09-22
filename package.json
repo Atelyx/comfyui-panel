@@ -1,6 +1,6 @@
 {
   "name": "com.atelyx.comfyui-panel",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "main": "src/index.tsx",
   "description": "把本机 ComfyUI 嵌入 Atelyx：面板内挑选工作流、调参、排队生成、查看实时进度，并把结果保存进当前仓库；另一面板内嵌 ComfyUI 原生编排界面。支持托管启动与停止 ComfyUI 进程。",
   "author": "Atelyx",
@@ -22,7 +22,7 @@
     "scope": "app",
     "bundle": true,
     "tagline": "把本机 ComfyUI 嵌进 Atelyx：编排、生成队列与结果落库",
-    "atelyxVersionMin": "0.4.7",
+    "atelyxVersionMin": "0.5.0",
     "declares": [
       "shell",
       "state",
@@ -44,7 +44,7 @@
       "native": "调用宿主的附件导入命令，把生成结果的图片字节落进仓库附件目录（插件上下文没有二进制写盘通道）",
       "app": "读取宿主平台信息，决定启动命令的写法",
       "clipboard": "把工作流 API JSON 复制到剪贴板",
-      "collab": "经协作通道向同房间（同仓库）的其他成员收发启停 ComfyUI 的命令；开启「允许远程启动」后，同房间成员可以启动/停止本机 ComfyUI",
+      "collab": "经协作通道向同一协作空间内的其他成员收发启停 ComfyUI 的命令；开启「允许远程启动」后，同空间成员可以启动/停止本机 ComfyUI",
       "services": "查询宿主可选服务（笔记），用于保存结果后追加到当前笔记"
     }
   }

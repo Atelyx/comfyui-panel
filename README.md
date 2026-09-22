@@ -2,7 +2,7 @@
 
 把本机 ComfyUI 嵌进 Atelyx 的**工作台插件**（`panel` 类型）：面板内挑工作流、调参数、排队生成、看实时进度并把结果存进仓库，另有面板内嵌 ComfyUI 原生的编排界面。
 
-> **要求：Atelyx 0.4.7 及以上**（插件包格式：`package.json` + 入口默认导出 `apply(ctx)`）。
+> **要求：Atelyx 0.5.0 及以上**（插件包格式：`package.json` + 入口默认导出 `apply(ctx)`）。
 
 ## 用法
 

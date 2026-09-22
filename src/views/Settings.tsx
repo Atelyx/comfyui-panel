@@ -158,12 +158,12 @@ export function SettingsView(props: SettingsProps): unknown {
       <Card title="远程启停">
         <Field
           label="允许远程启动"
-          hint="开启后，同房间（同一仓库）的其他成员可以启动/停止本机 ComfyUI。远程启动会注入 --listen 0.0.0.0，本机服务将暴露给局域网。"
+          hint="开启后，同一协作空间内的其他成员可以启动/停止本机 ComfyUI。远程启动会注入 --listen 0.0.0.0，本机服务将暴露给局域网。"
         >
           <Checkbox
             checked={settings.remoteEnabled}
             onChange={(checked) => patch({ remoteEnabled: checked })}
-            label="受理同房间成员的远程启动"
+            label="受理同一协作空间内成员的远程启动"
           />
         </Field>
         <Field
