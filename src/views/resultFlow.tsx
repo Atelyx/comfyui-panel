@@ -7,10 +7,15 @@
  * 「标题 + 时间 + 若干张图」，每张图可预览、保存到仓库。
  */
 import React from "react";
+import type { AtelyxCtx } from "../ctx";
 import type { ProgressPayload, QueueItem } from "../comfy/types";
 import type { ComfyRuntime, ResultImage } from "../runtime";
 import { parseAspectPair } from "../workflow/form";
 import {
+  ContextMenu,
+  ContextMenuItem,
+  CopyIcon,
+  DownloadIcon,
   SCROLL_LIST_CLASS,
   accent,
   bgPrimary,
@@ -27,6 +32,7 @@ import {
 } from "./ui";
 
 interface RecordFlowProps {
+  ctx: AtelyxCtx;
   runtime: ComfyRuntime;
   results: ResultImage[];
   /** 队列快照（queue_running / queue_pending）。 */
@@ -34,6 +40,8 @@ interface RecordFlowProps {
   pending: QueueItem[];
   progress: ProgressPayload | null;
   offline: boolean;
+  /** 协作空间仓库不可落库：保存入口禁用并说明原因。 */
+  saveDisabled: boolean;
   savingKey: string | null;
   onArchive: (item: ResultImage) => void;
   onInterrupt: () => void;
@@ -83,6 +91,37 @@ export function RecordFlow(props: RecordFlowProps): unknown {
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     setTopFade(el.scrollHeight > el.clientHeight + 4);
   }, []);
+
+  /** 预览右键「复制图片」：字节走直连通道，成败以 boolean 回给遮罩就地提示。 */
+  const copyPreviewImage = React.useCallback(
+    async (item: ResultImage): Promise<boolean> => {
+      try {
+        const dataUrl = await props.runtime.imageDataUrl(item.ref);
+        await props.ctx.clipboard.copyImage(dataUrl);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [props.ctx, props.runtime],
+  );
+
+  /** 预览右键「下载图片」：宿主命令落系统 Downloads，重名由宿主自动加序号。 */
+  const downloadPreviewImage = React.useCallback(
+    async (item: ResultImage): Promise<boolean> => {
+      try {
+        const dataUrl = await props.runtime.imageDataUrl(item.ref);
+        await props.ctx.native.invoke("save_image_to_downloads", {
+          fileName: item.ref.filename,
+          dataUrl,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [props.ctx, props.runtime],
+  );
 
   return (
     <div
@@ -144,6 +183,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
                         item={item}
                         url={props.runtime.imageUrl(item.ref)}
                         saving={props.savingKey === item.key}
+                        saveDisabled={props.saveDisabled}
                         onPreview={() => setPreviewKey(item.key)}
                         onArchive={() => props.onArchive(item)}
                       />
@@ -168,6 +208,8 @@ export function RecordFlow(props: RecordFlowProps): unknown {
             item={previewed}
             url={props.runtime.imageUrl(previewed.ref, false)}
             onClose={() => setPreviewKey(null)}
+            onCopyImage={() => copyPreviewImage(previewed)}
+            onDownloadImage={() => downloadPreviewImage(previewed)}
           />
         ) : null}
       </div>
@@ -317,6 +359,7 @@ function RecordImage(props: {
   item: ResultImage;
   url: string;
   saving: boolean;
+  saveDisabled: boolean;
   onPreview: () => void;
   onArchive: () => void;
 }): unknown {
@@ -402,8 +445,8 @@ function RecordImage(props: {
           </span>
           <button
             type="button"
-            title="保存到仓库"
-            disabled={props.saving}
+            title={props.saveDisabled ? "协作空间仓库暂不支持保存图片" : "保存到仓库"}
+            disabled={props.saving || props.saveDisabled}
             onClick={props.onArchive}
             style={{
               border: "none",
@@ -412,7 +455,7 @@ function RecordImage(props: {
               color: "#111",
               fontSize: 10,
               padding: "2px 6px",
-              cursor: props.saving ? "not-allowed" : "pointer",
+              cursor: props.saving || props.saveDisabled ? "not-allowed" : "pointer",
             }}
           >
             {props.saving ? "保存中" : "保存"}
@@ -428,19 +471,58 @@ function clampRatio(ratio: number): number {
   return Math.max(0.6, Math.min(2.4, ratio));
 }
 
-/** 大图遮罩。 */
-function PreviewOverlay(props: { item: ResultImage; url: string; onClose: () => void }): unknown {
+/** 操作结果提示自动消失时长。 */
+const NOTICE_MS = 2500;
+
+/**
+ * 大图遮罩：点击遮罩或 Esc 关闭；右键（图上或遮罩空白处）弹「复制图片 / 下载图片」，
+ * 动作成败以 boolean 返回、在遮罩底部就地提示。菜单开着时 Esc 只关菜单不连关预览。
+ */
+function PreviewOverlay(props: {
+  item: ResultImage;
+  url: string;
+  onClose: () => void;
+  onCopyImage: () => Promise<boolean>;
+  onDownloadImage: () => Promise<boolean>;
+}): unknown {
+  const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+  const [notice, setNotice] = React.useState<{ text: string; kind: "success" | "error" } | null>(null);
+
+  React.useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
+      if (e.key === "Escape") {
+        if (menu) setMenu(null);
+        else props.onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [props]);
+  }, [menu, props]);
+
+  /** 执行菜单动作：关菜单 → 等结果 → 就地提示。 */
+  const runAction = React.useCallback(
+    (action: () => Promise<boolean>, okText: string, failText: string) => {
+      setMenu(null);
+      void action()
+        .then((ok) => setNotice({ text: ok ? okText : failText, kind: ok ? "success" : "error" }))
+        .catch(() => setNotice({ text: failText, kind: "error" }));
+    },
+    [],
+  );
 
   return (
     <div
       onClick={props.onClose}
+      onContextMenu={(e: { preventDefault(): void; clientX: number; clientY: number }) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
       style={{
         position: "fixed",
         inset: 0,
@@ -458,6 +540,39 @@ function PreviewOverlay(props: { item: ResultImage; url: string; onClose: () => 
         alt={props.item.ref.filename}
         style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 6 }}
       />
+      {menu ? (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <ContextMenuItem
+            onClick={() => runAction(props.onCopyImage, "已复制到剪贴板", "复制图片失败，请重试")}
+          >
+            <CopyIcon size={13} />
+            复制图片
+          </ContextMenuItem>
+          <ContextMenuItem
+            onClick={() => runAction(props.onDownloadImage, "已保存到 Downloads", "下载图片失败，请重试")}
+          >
+            <DownloadIcon size={13} />
+            下载图片
+          </ContextMenuItem>
+        </ContextMenu>
+      ) : null}
+      {notice ? (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 32,
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "6px 12px",
+            borderRadius: 6,
+            fontSize: FONT_SM,
+            background: "rgba(0,0,0,0.75)",
+            color: notice.kind === "success" ? "#4ade80" : "#f87171",
+          }}
+        >
+          {notice.text}
+        </div>
+      ) : null}
     </div>
   );
 }

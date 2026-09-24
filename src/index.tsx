@@ -151,6 +151,17 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   }
 
   pluginCtx.effect(() => {
+    // 当前仓库身份（null = 协作空间仓库）：决定结果能否保存。宿主在插件装载完成后
+    // 才广播 vault:switch，这里订阅时事件必然未发过，收不到事件的场景按 unknown 保留直调通道。
+    const offVault = pluginCtx.events.on("vault:switch", (p) => {
+      deps?.runtime.setVaultRoot(p.root);
+    });
+    return () => {
+      offVault();
+    };
+  });
+
+  pluginCtx.effect(() => {
     // 进程收尾由 Atelyx 统一负责（插件停用/卸载/应用退出都会结束本插件启动的进程树）
     const offPanel = pluginCtx.slots.registerView({
       kind: VIEW_KIND,

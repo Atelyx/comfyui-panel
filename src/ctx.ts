@@ -47,6 +47,8 @@ export interface CollabMyPeer {
 
 /** 宿主事件载荷（只列本插件订阅的事件）。 */
 export interface AtelyxEvents {
+  /** 进仓/切仓完成广播；`root` 为 null 表示协作空间仓库（无本地根）。 */
+  "vault:switch": { root: string | null };
   /** 收到同一协作空间内其他成员发来的插件消息；不含自己。 */
   "collab:message": { peerId: number; channel: string; payload: unknown };
   "collab:changed": { peers: CollabPeer[] };
@@ -116,6 +118,8 @@ export interface AtelyxCtx extends Context {
   clipboard: {
     readText(): Promise<string>;
     writeText(text: string): Promise<void>;
+    /** 图片 dataURL 进系统剪贴板（预览右键复制用）。 */
+    copyImage(dataUrl: string): Promise<void>;
   };
   /**
    * 协作服务：同一协作空间内的成员与消息收发。
@@ -132,15 +136,6 @@ export interface AtelyxCtx extends Context {
   /** 宿主事件订阅；返回撤销函数，监听器随插件停用一并撤销。 */
   events: {
     on<K extends keyof AtelyxEvents>(name: K, listener: (payload: AtelyxEvents[K]) => void): () => void;
-  };
-  /**
-   * 服务发现：用于「存在则用、不存在则降级」的可选依赖。
-   *
-   * `note` 服务由随应用分发的笔记插件提供（停用即消失），所以**不能**写进 apply 的 inject
-   * ——那会让本插件在用户停用笔记插件时直接激活失败；这里判空使用。
-   */
-  services: {
-    get(name: string): unknown;
   };
   slots: {
     registerView(opts: RegisterViewOptions): () => void;

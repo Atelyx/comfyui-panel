@@ -740,3 +740,93 @@ export function Card(props: { title: string; children: unknown; actions?: unknow
     </div>
   );
 }
+
+export function DownloadIcon(props: { size?: number }): unknown {
+  return (
+    <Svg size={props.size}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="M7 10l5 5 5-5" />
+      <path d="M12 15V3" />
+    </Svg>
+  );
+}
+
+/** 右键菜单容器：fixed 定位 + 实测尺寸视口钳制 + 点击外部关闭（Esc 归调用方，便于区分菜单与弹层两层）。 */
+export function ContextMenu(props: {
+  x: number;
+  y: number;
+  onClose: () => void;
+  children: unknown;
+}): unknown {
+  const { x, y, onClose } = props;
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = React.useState({ x, y });
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setPos({
+      x: Math.max(4, Math.min(x, window.innerWidth - el.offsetWidth - 4)),
+      y: Math.max(4, Math.min(y, window.innerHeight - el.offsetHeight - 4)),
+    });
+  }, [x, y]);
+  React.useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [onClose]);
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "fixed",
+        left: pos.x,
+        top: pos.y,
+        zIndex: 70,
+        minWidth: 150,
+        padding: "4px 0",
+        borderRadius: 8,
+        border: `1px solid ${border}`,
+        background: bgSecondary,
+        boxShadow: "0 10px 32px rgba(0,0,0,0.25)",
+      }}
+      // 菜单内再右键不落到遮罩上，避免菜单在原地反复重开
+      onContextMenu={(e: { preventDefault(): void; stopPropagation(): void }) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      {props.children}
+    </div>
+  );
+}
+
+/** 右键菜单项：图标 + 文案，悬停用强调色底。 */
+export function ContextMenuItem(props: { onClick: () => void; children: unknown }): unknown {
+  const [isHover, setHover] = React.useState(false);
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        width: "100%",
+        padding: "6px 12px",
+        border: "none",
+        background: isHover ? accent : "transparent",
+        color: isHover ? accentFg : textPrimary,
+        fontSize: FONT_SM,
+        fontFamily: "inherit",
+        textAlign: "left",
+        cursor: "pointer",
+      }}
+    >
+      {props.children}
+    </button>
+  );
+}

@@ -15,7 +15,7 @@ import type { ApiPrompt } from "../comfy/types";
 import type { ComfyRuntime, ResultImage } from "../runtime";
 import type { HostController } from "../host/controller";
 import type { RemoteControl } from "../host/remote";
-import { archiveImage, appendToCurrentNote } from "../host/archive";
+import { archiveImage } from "../host/archive";
 import { exportWorkflow, type StoredWorkflow } from "../workflow/library";
 import { workflowDisplayName } from "../workflow/files";
 import { getGenerateSession, saveGenerateSession } from "./generateSession";
@@ -282,7 +282,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
    * 未指定时自动取第一个未连线提示词字段（按节点迭代顺序）。
    */
   const candidatePrompts = fields.filter(
-    (f) => !f.connected && (f.input === "text" || f.input === "positive" || f.input === "empty_prompt"),
+    (f) => !f.connected && (f.input === "text" || f.input === "positive" || f.input === "empty_prompt" || f.input === "prompt"),
   );
   const promptField =
     candidatePrompts.find((f) => fieldKey(f) === promptFieldKey) ?? candidatePrompts[0];
@@ -515,19 +515,19 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
 
   const doArchive = React.useCallback(
     async (item: ResultImage) => {
+      if (runtime.getSnapshot().vaultKind === "space") {
+        setActionError("协作空间仓库暂不支持保存图片：请切换到个人仓库后再保存");
+        return;
+      }
       setSavingKey(item.key);
       setActionError("");
       try {
         const bytes = await runtime.imageBytes(item.ref);
         const result = await archiveImage(ctx, bytes, item.ref);
         runtime.markSaved(item.key, result.path);
-        let appended = false;
-        if (runtime.getSnapshot().settings.appendToNote) {
-          appended = await appendToCurrentNote(ctx, result.path);
-        }
         ctx.notification.notify({
           level: "success",
-          message: appended ? `已保存到 ${result.path} 并追加到当前笔记` : `已保存到 ${result.path}`,
+          message: `已保存到 ${result.path}`,
         });
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
@@ -673,12 +673,14 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       ) : (
         <>
           <RecordFlow
+            ctx={ctx}
             runtime={runtime}
             results={snapshot.results}
             running={snapshot.queue.queue_running}
             pending={snapshot.queue.queue_pending}
             progress={snapshot.progress}
             offline={offline}
+            saveDisabled={snapshot.vaultKind === "space"}
             savingKey={savingKey}
             onArchive={(item) => void doArchive(item)}
             onInterrupt={() => void runtime.interrupt()}

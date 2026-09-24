@@ -26,8 +26,6 @@ export interface ComfySettings {
   autoCors: boolean;
   /** 落库子目录，留空则用仓库的附件目录。 */
   archiveFolder: string;
-  /** 落库后是否把图片追加到当前笔记。 */
-  appendToNote: boolean;
   /** 是否受理同一协作空间内其他成员的远程启停命令。 */
   remoteEnabled: boolean;
   /** 本机标识：远程命令的目标匹配与回执展示；留空回落到宿主的设备名。 */
@@ -51,7 +49,6 @@ export const DEFAULT_SETTINGS: ComfySettings = {
   extraArgs: "",
   autoCors: true,
   archiveFolder: "",
-  appendToNote: false,
   remoteEnabled: false,
   remoteTag: "",
 };
@@ -79,7 +76,6 @@ function coerce(raw: unknown): ComfySettings {
     extraArgs: str("extraArgs", DEFAULT_SETTINGS.extraArgs),
     autoCors: bool("autoCors", DEFAULT_SETTINGS.autoCors),
     archiveFolder: str("archiveFolder", DEFAULT_SETTINGS.archiveFolder),
-    appendToNote: bool("appendToNote", DEFAULT_SETTINGS.appendToNote),
     remoteEnabled: bool("remoteEnabled", DEFAULT_SETTINGS.remoteEnabled),
     remoteTag: str("remoteTag", DEFAULT_SETTINGS.remoteTag),
   };

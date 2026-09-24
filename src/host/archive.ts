@@ -69,17 +69,3 @@ export async function archiveImage(
     }
   }
 }
-
-/** 笔记服务可选（提供者被停用即跳过）。用相对路径引用，换机器或换仓库根目录后仍能解析。 */
-export async function appendToCurrentNote(ctx: AtelyxCtx, repoPath: string): Promise<boolean> {
-  const note = ctx.services.get("note") as
-    | { currentFile(): string | null; write(content: string): Promise<void>; read(file?: string): Promise<string> }
-    | undefined;
-  if (!note) return false;
-  const file = note.currentFile();
-  if (!file) return false;
-  const current = await note.read();
-  const separator = current.endsWith("\n") || current.length === 0 ? "" : "\n";
-  await note.write(`${current}${separator}\n![](${repoPath})\n`);
-  return true;
-}

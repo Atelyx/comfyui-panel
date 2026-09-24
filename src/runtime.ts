@@ -6,7 +6,7 @@
  * 否则切面板就断连接。更新一律换新对象，因为订阅方靠引用比较决定是否重渲染。
  */
 import { ComfyClient } from "./comfy/client";
-import { ComfySocket, type SocketHandlers } from "./comfy/socket";
+import { ComfySocket, bytesToBase64, type SocketHandlers } from "./comfy/socket";
 import { ComfyTransport, type Channel } from "./comfy/transport";
 import type {
   ApiPrompt,
@@ -50,6 +50,12 @@ export interface ResultImage {
 export interface RuntimeSnapshot {
   settings: ComfySettings;
   channel: Channel;
+  /**
+   * 当前仓库身份（宿主 `vault:switch` 广播）：`space` = 协作空间仓库（无本地根）。
+   * 未收到广播前为 `unknown`——此时不得禁用保存，行为保持与既有直调通道一致，
+   * 避免老宿主不发事件时把保存整个堵死。
+   */
+  vaultKind: "local" | "space" | "unknown";
   /** 首屏与手动重连时为 true。 */
   probing: boolean;
   systemStats: SystemStats | null;
@@ -108,6 +114,7 @@ export class ComfyRuntime {
     this.snap = {
       settings,
       channel: "offline",
+      vaultKind: "unknown",
       probing: false,
       systemStats: null,
       queue: EMPTY_QUEUE,
@@ -398,6 +405,17 @@ export class ComfyRuntime {
     return this.client.imageBytes(ref);
   }
 
+  /** 结果图的 dataURL（预览里复制/下载用）；mime 按扩展名，未知类型按 png 兜底。 */
+  async imageDataUrl(ref: ImageRef): Promise<string> {
+    const bytes = await this.imageBytes(ref);
+    return `data:${imageMime(ref.filename)};base64,${bytesToBase64(bytes)}`;
+  }
+
+  /** 宿主切仓广播（`vault:switch`）：null = 协作空间仓库，无本地根。 */
+  setVaultRoot(root: string | null): void {
+    this.emit({ vaultKind: root === null ? "space" : "local" });
+  }
+
   /** 缩略图地址。 */
   imageUrl(ref: ImageRef, preview = true): string {
     return this.client.imageUrl(ref, preview);
@@ -483,4 +501,13 @@ function imagesOf(promptId: string, entry: HistoryEntry, title: string): ResultI
 function describe(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** dataURL 的 mime 按扩展名判定；ComfyUI 输出以 png 为主，未知扩展按 png 兜底。 */
+function imageMime(fileName: string): string {
+  const ext = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  return "image/png";
 }

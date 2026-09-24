@@ -191,13 +191,9 @@ export function SettingsView(props: SettingsProps): unknown {
             placeholder="留空使用仓库附件目录"
           />
         </Field>
-        <Field label="追加入笔记" hint="保存后以 Markdown 追加到当前笔记末尾">
-          <Checkbox
-            checked={settings.appendToNote}
-            onChange={(checked) => patch({ appendToNote: checked })}
-            label="保存结果后追加到当前笔记"
-          />
-        </Field>
+        <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
+          协作空间仓库暂不支持保存，生成结果只能在个人仓库落库。
+        </div>
       </Card>
 
       <div style={{ color: textMuted, fontSize: 11, lineHeight: 1.6 }}>
