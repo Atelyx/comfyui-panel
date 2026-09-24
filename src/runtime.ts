@@ -31,6 +31,7 @@ import {
   type SaveParamsResult,
 } from "./workflow/library";
 import { diffWorkflows, type WorkflowFileInfo } from "./workflow/files";
+import { promptTextOf } from "./workflow/form";
 
 /** 一条生成结果（历史里的一张图）。 */
 export interface ResultImage {
@@ -40,6 +41,8 @@ export interface ResultImage {
   ref: ImageRef;
   /** 提交时记下的标题，给画廊做标签。 */
   title: string;
+  /** 该批提交的提示词文本；工作流没有文本字段时为空串。 */
+  promptText: string;
   createdAt: number;
   /** 失败的任务仍可能产出部分图。 */
   failed: boolean;
@@ -467,6 +470,7 @@ function imagesOf(promptId: string, entry: HistoryEntry, title: string): ResultI
   // 提交时间在附加数据里；取不到就当作刚完成——排序只需单调，不必绝对准确
   const extra = entry.prompt?.[3] as { create_time?: unknown } | undefined;
   const createdAt = typeof extra?.create_time === "number" ? extra.create_time : Date.now();
+  const promptText = promptTextOf(entry.prompt?.[2]);
   const items: ResultImage[] = [];
   for (const output of Object.values(outputs)) {
     const refs: ImageRef[] = [];
@@ -479,6 +483,7 @@ function imagesOf(promptId: string, entry: HistoryEntry, title: string): ResultI
         promptId,
         ref: { filename: ref.filename, subfolder: ref.subfolder ?? "", type: ref.type ?? "output" },
         title: title || promptTitleFallback(entry),
+        promptText,
         createdAt,
         failed,
       });

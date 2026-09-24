@@ -282,3 +282,28 @@ export function countDisabledNodes(prompt: ApiPrompt): number {
   }
   return count;
 }
+
+/** 提示词类输入名，主提示词候选与记录标题共用这一份口径。 */
+const PROMPT_INPUTS = new Set(["text", "positive", "empty_prompt", "prompt"]);
+
+/** 是否提示词类输入。 */
+export function isPromptInput(input: string): boolean {
+  return PROMPT_INPUTS.has(input);
+}
+
+/**
+ * 该批提交的提示词文本：取第一个未连线且非空的提示词类字段值。
+ * 连线引用是 `[节点id, 槽位]` 数组，字符串值必然是字面量；正向与反向的输入名常同为
+ * text，只能按节点顺序区分（常规工作流正向在前）。取不到返回空串。
+ */
+export function promptTextOf(prompt: unknown): string {
+  if (!prompt || typeof prompt !== "object") return "";
+  for (const node of Object.values(prompt as Record<string, { inputs?: Record<string, unknown> }>)) {
+    for (const [input, value] of Object.entries(node?.inputs ?? {})) {
+      if (typeof value !== "string" || !isPromptInput(input)) continue;
+      const text = value.trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}

@@ -3,14 +3,15 @@
  *
  * 记录按「旧→新」纵向排列：新生成从底部冒出、把旧的顶到上方，顶部溢出部分以渐变
  * 遮罩过渡；贴底时新记录自动滚到最新，往上翻历史不打扰。运行中的任务以占位记录
- * 展示（规格取队列里该任务的真实 prompt，不依赖草稿），完成后按 promptId 分组为
- * 「标题 + 时间 + 若干张图」，每张图可预览、保存到仓库。
+ * 展示（规格与提示词标题都取队列里该任务的真实 prompt，不依赖草稿），完成后按
+ * promptId 分组为「提示词标题 + 时间 + 若干张图」，标题可一键复制，每张图可预览、
+ * 保存到仓库。
  */
 import React from "react";
 import type { AtelyxCtx } from "../ctx";
 import type { ProgressPayload, QueueItem } from "../comfy/types";
 import type { ComfyRuntime, ResultImage } from "../runtime";
-import { parseAspectPair } from "../workflow/form";
+import { parseAspectPair, promptTextOf } from "../workflow/form";
 import {
   ContextMenu,
   ContextMenuItem,
@@ -106,6 +107,17 @@ export function RecordFlow(props: RecordFlowProps): unknown {
     [props.ctx, props.runtime],
   );
 
+  /** 复制某批的完整提示词：成败都弹宿主通知，记录流内不另设错误区。 */
+  const copyPrompt = React.useCallback(
+    (text: string) => {
+      void props.ctx.clipboard
+        .writeText(text)
+        .then(() => props.ctx.notification.notify({ level: "success", message: "已复制提示词" }))
+        .catch(() => props.ctx.notification.notify({ level: "error", message: "复制提示词失败，请重试" }));
+    },
+    [props.ctx],
+  );
+
   /** 预览右键「下载图片」：宿主命令落系统 Downloads，重名由宿主自动加序号。 */
   const downloadPreviewImage = React.useCallback(
     async (item: ResultImage): Promise<boolean> => {
@@ -163,12 +175,19 @@ export function RecordFlow(props: RecordFlowProps): unknown {
           <>
             {records.map((record) => {
               const failed = record.items.some((item) => item.failed);
+              const lead = record.items[0];
+              const promptText = lead?.promptText ?? "";
               return (
                 <RecordCard
                   key={record.promptId}
-                  title={record.items[0]?.title ?? "未命名任务"}
-                  time={record.items[0]?.createdAt}
+                  title={promptText || lead?.title || "未命名任务"}
+                  time={lead?.createdAt}
                   failed={failed}
+                  action={
+                    promptText ? (
+                      <CopyPromptButton text={promptText} onCopy={copyPrompt} />
+                    ) : null
+                  }
                 >
                   <div
                     style={{
@@ -198,6 +217,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
                 pending={props.pending}
                 progress={props.progress}
                 onInterrupt={props.onInterrupt}
+                onCopyPrompt={copyPrompt}
               />
             ) : null}
           </>
@@ -231,24 +251,36 @@ export function RecordFlow(props: RecordFlowProps): unknown {
   );
 }
 
-/** 运行中的占位记录：标题行（计数 + 中断）与按输出规格排布的占位动画。 */
+/** 运行中的占位记录：标题行（提示词 + 运行/等待计数 + 复制 + 中断）与按输出规格排布的占位动画。 */
 function RunningRecord(props: {
   running: QueueItem[];
   pending: QueueItem[];
   progress: ProgressPayload | null;
   onInterrupt: () => void;
+  onCopyPrompt: (text: string) => void;
 }): unknown {
-  const spec = promptSpec(props.running[0]?.[2]);
+  const prompt = props.running[0]?.[2];
+  const spec = promptSpec(prompt);
+  const promptText = promptTextOf(prompt);
   const percent =
     props.progress && props.progress.max > 0 ? (props.progress.value / props.progress.max) * 100 : null;
+  const queued = props.running.length + props.pending.length;
   return (
     <RecordCard
-      title={`生成中${props.running.length > 0 ? ` · 运行 ${props.running.length} · 等待 ${props.pending.length}` : ""}`}
+      title={promptText || "生成中"}
       action={
-        <Button tone="danger" onClick={props.onInterrupt} title="中断当前执行">
-          <SquareIcon size={12} />
-          中断
-        </Button>
+        <>
+          {queued > 0 ? (
+            <span style={{ fontSize: 10, color: textMuted, flexShrink: 0 }}>
+              {`运行 ${props.running.length} · 等待 ${props.pending.length}`}
+            </span>
+          ) : null}
+          {promptText ? <CopyPromptButton text={promptText} onCopy={props.onCopyPrompt} /> : null}
+          <Button tone="danger" onClick={props.onInterrupt} title="中断当前执行">
+            <SquareIcon size={12} />
+            中断
+          </Button>
+        </>
       }
     >
       <GenerationGrid
@@ -258,6 +290,32 @@ function RunningRecord(props: {
         node={props.progress?.node ?? ""}
       />
     </RecordCard>
+  );
+}
+
+/** 标题行的复制按钮：复制该批完整提示词，常驻小图标、悬停提亮。 */
+function CopyPromptButton(props: { text: string; onCopy: (text: string) => void }): unknown {
+  const [isHover, setHover] = React.useState(false);
+  return (
+    <button
+      type="button"
+      title="复制提示词"
+      onClick={() => props.onCopy(props.text)}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        border: "none",
+        background: "transparent",
+        padding: 2,
+        color: isHover ? textPrimary : textMuted,
+        cursor: "pointer",
+        flexShrink: 0,
+      }}
+    >
+      <CopyIcon size={12} />
+    </button>
   );
 }
 

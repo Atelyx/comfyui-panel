@@ -29,6 +29,7 @@ import {
   fieldKey,
   fieldLabel,
   isCommonField,
+  isPromptInput,
   parseAspectPair,
   readField,
   writeField,
@@ -281,9 +282,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
    * 主提示词字段：优先用户在高级参数里指定的（`nodeId.input` 精确匹配）；
    * 未指定时自动取第一个未连线提示词字段（按节点迭代顺序）。
    */
-  const candidatePrompts = fields.filter(
-    (f) => !f.connected && (f.input === "text" || f.input === "positive" || f.input === "empty_prompt" || f.input === "prompt"),
-  );
+  const candidatePrompts = fields.filter((f) => !f.connected && isPromptInput(f.input));
   const promptField =
     candidatePrompts.find((f) => fieldKey(f) === promptFieldKey) ?? candidatePrompts[0];
   /** 指定的字段在当前工作流已不存在（如切换工作流）时回落到自动。 */
