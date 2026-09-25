@@ -132,6 +132,9 @@ export interface AtelyxCtx extends Context {
     /** 发往同一协作空间内其他成员；`to` 指定则定向单播。返回是否已投递到传输层。 */
     sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
     myPeer(): CollabMyPeer;
+    /** 声明本插件需要协作通道，返回释放函数（随插件停用/卸载撤销）。
+     *  宿主只为有活跃声明的窗口维持协作连接；旧版宿主无此方法，插件须探测降级。 */
+    acquire?(): () => void;
   };
   /** 宿主事件订阅；返回撤销函数，监听器随插件停用一并撤销。 */
   events: {

@@ -35,8 +35,6 @@ export interface StartOptions {
   onExit(code: number | null): void;
   /** 启动失败。 */
   onError(message: string): void;
-  /** 追加在用户附加参数之后的启动参数（远程启动据此强制监听全网卡）。 */
-  extraTokens?: readonly string[];
 }
 
 /**
@@ -46,17 +44,20 @@ export interface StartOptions {
  * `\"`，而 `cmd.exe` 不认这种转义（它只认 `""` 双写），命令会被拆坏。
  * 逐项传参由Atelyx按需加引号，cmd 能正确解析。
  *
- * `extraTokens` 排在用户附加参数**之后**：ComfyUI 的 argparse 对同名开关取最后一个，
- * 位置靠后才能覆盖用户在附加参数里写的监听地址，远程连不上的问题才不会留下隐患。
+ * 「允许远程启动」开启后，托管启动（含本机自行启动）一律把监听地址放在用户附加参数之后：
+ * ComfyUI 的 argparse 对同名开关取最后一个，位置靠后才能覆盖用户自填的监听地址。
+ * 本机自启动同样放开监听，同空间成员才能直接连上使用，而不必由对方重新发起一次启动；
+ * 暴露面变大是这个开关的固有代价，设置页写明后果。
  */
-export function buildStartTokens(settings: ComfySettings, extraTokens: readonly string[] = []): string[] {
+export function buildStartTokens(settings: ComfySettings): string[] {
   const python = resolvePython(settings);
   if (!python) throw new Error("未配置 ComfyUI 目录或 Python 路径");
   const tokens = [python, "main.py", "--port", String(settings.port)];
   // 插件与 ComfyUI 通信的前提，关掉后连不上
   if (settings.autoCors) tokens.push("--enable-cors-header");
-  // 整串塞成一个参数会让Atelyx把它引成一个，多个开关就失效了，故按命令行习惯切分
-  return [...tokens, ...splitArgs(settings.extraArgs), ...extraTokens];
+  const args = [...tokens, ...splitArgs(settings.extraArgs)];
+  if (settings.remoteEnabled) args.push("--listen", "0.0.0.0");
+  return args;
 }
 
 /**
@@ -90,8 +91,8 @@ function splitArgs(text: string): string[] {
 }
 
 /** 供界面展示的命令行（仅为可读，执行不走它）。 */
-export function describeStartCommand(settings: ComfySettings, extraTokens: readonly string[] = []): string {
-  return buildStartTokens(settings, extraTokens).map(shellQuote).join(" ");
+export function describeStartCommand(settings: ComfySettings): string {
+  return buildStartTokens(settings).map(shellQuote).join(" ");
 }
 
 /** 含空白或引号时加引号（仅用于展示与 Unix 的 `-c` 串）。 */
@@ -121,7 +122,7 @@ export async function startComfy(
 ): Promise<ShellProcessHandle> {
   const cwd = settings.comfyDir.trim();
   if (!cwd) throw new Error("未配置 ComfyUI 目录");
-  const tokens = buildStartTokens(settings, options.extraTokens);
+  const tokens = buildStartTokens(settings);
 
   const command = platform === "windows" ? "cmd.exe" : "sh";
   const args = runArgs(platform, tokens);

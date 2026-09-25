@@ -29,10 +29,8 @@ const READY_TIMEOUT_MS = 180000;
 /** 错误输出可能极长（Python traceback 单行也能几十 KB），进通知与快照前截断。 */
 const ERROR_DETAIL_MAX = 200;
 
-/** 启动请求的可选来源信息（远程启动据此注入参数并标明发起方）。 */
+/** 启动请求的可选来源信息（远程启动据此标明发起方）。 */
 export interface StartRequest {
-  /** 追加在用户附加参数之后的启动参数。 */
-  extraTokens?: readonly string[];
   /** 触发来源，写进日志首行，便于事后分辨是谁起的进程。 */
   origin?: string;
 }
@@ -158,7 +156,7 @@ export class HostController {
     this.cancelled = false;
     let line: string;
     try {
-      line = describeStartCommand(this.settings, request.extraTokens);
+      line = describeStartCommand(this.settings);
     } catch (err) {
       const message = describe(err);
       this.emit({ error: message });
@@ -171,7 +169,6 @@ export class HostController {
 
     try {
       const handle = await startComfy(this.ctx, await this.getPlatform(), this.settings, {
-        extraTokens: request.extraTokens,
         onLog: (text, stream) => {
           if (stream === "stderr" && text.trim()) this.lastStderr = text.trim();
           this.log(text, stream);

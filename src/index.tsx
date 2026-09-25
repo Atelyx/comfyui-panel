@@ -191,6 +191,14 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   });
 
   pluginCtx.effect(() => {
+    // 声明本插件需要协作通道：宿主只为有活跃声明的窗口维持协作连接，远程启停的收发全靠它。
+    // 旧版宿主没有声明面：降级为不声明，远程启停会提示升级宿主。
+    if (!pluginCtx.collab.acquire) return;
+    const release = pluginCtx.collab.acquire();
+    return () => release();
+  });
+
+  pluginCtx.effect(() => {
     const offConnect = pluginCtx.slots.registerCommand({
       id: `${PLUGIN_ID}.connect`,
       label: "ComfyUI：连接 / 刷新",

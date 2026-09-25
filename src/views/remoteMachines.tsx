@@ -78,13 +78,11 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
 
           {snapshot.error ? <Notice tone="warn">{snapshot.error}</Notice> : null}
 
-          {snapshot.machines.length === 0 ? (
+          {snapshot.machines.length === 0 && !snapshot.error ? (
             <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
-              {snapshot.error
-                ? "远程启停要求两台机器都启用协作，并登录同一个协作服务器、进入同一个协作空间。"
-                : "同一协作空间内没有其他成员。远程启停要求两台机器都启用协作、进入同一个协作空间，且对端装了本插件。"}
+              同一协作空间内没有其他成员。远程启停要求两台机器都启用协作、进入同一个协作空间，且对端装了本插件。
             </div>
-          ) : (
+          ) : snapshot.machines.length === 0 ? null : (
             snapshot.machines.map((machine) => <MachineRow key={machine.peerId} machine={machine} remote={remote} />)
           )}
         </div>

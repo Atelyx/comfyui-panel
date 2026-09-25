@@ -40,14 +40,6 @@ const STOP_RESULT_TIMEOUT_MS = 30000;
 /** 幂等记录条数：协作是低频操作，留一小段足够挡住重投，不无界增长。 */
 const HANDLED_LIMIT = 32;
 
-/**
- * 远程启动强制监听全网卡。
- *
- * 本机自用只需回环地址，远程要连上就必须放开监听——否则对端拉到一半连不上，
- * 界面上只看到「已启动」。暴露面变大是这条能力的固有代价，设置页对该开关有后果说明。
- */
-const REMOTE_LISTEN_ARGS: readonly string[] = ["--listen", "0.0.0.0"];
-
 /** 远程命令的进度。 */
 export interface RemoteTask {
   kind: "start" | "stop";
@@ -166,14 +158,23 @@ export class RemoteControl {
     });
   }
 
-  /** 状态请求发不出去时的原因：先分辨「根本不在协作空间」与「在空间内但通道没连上」。 */
+  /** 状态请求发不出去时的原因：先分辨「宿主协作能力面缺失」与「能力面在但通道未连接」。 */
   private channelError(delivered: boolean): string {
     if (delivered) return "";
-    const me = this.myPeer();
-    if (!me || me.peerId === null) {
-      return "不在协作空间内：需在 Atelyx 登录协作服务器并进入同一个协作空间，成员之间才能互见";
+    let me: CollabMyPeer | null = null;
+    try {
+      me = this.ctx.collab.myPeer();
+    } catch {
+      me = null;
     }
-    return "协作通道未连接，状态请求未发出";
+    // 意愿声明面与协作连接判定同批加入：缺它说明宿主不会为插件面板建立协作连接
+    if (!me || !this.ctx.collab.acquire) {
+      return "当前 Atelyx 版本不支持插件的协作通道，请升级 Atelyx 后使用远程启停";
+    }
+    if (me.peerId === null) {
+      return "协作通道未连接：请确认 Atelyx 已开启协作、当前打开的是协作空间内的仓库，稍候重试";
+    }
+    return "协作通道暂不可用，请稍候重试";
   }
 
   /** 启动对端；结果一律折进任务状态，不向调用方抛错。 */
@@ -349,7 +350,6 @@ export class RemoteControl {
     this.sendTo(peerId, ack);
 
     const ready = await this.host.start(this.runtime, {
-      extraTokens: REMOTE_LISTEN_ARGS,
       origin: `远程启动（来自 ${this.peerLabel(peerId)}）`,
     });
     const message = ready
