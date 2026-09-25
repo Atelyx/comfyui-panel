@@ -132,6 +132,16 @@ export function SettingsView(props: SettingsProps): unknown {
         <Field label="跨域放行" hint="插件与 ComfyUI 通信的前提；关闭后将无法连接">
           <Checkbox checked={settings.autoCors} onChange={(checked) => patch({ autoCors: checked })} label="启动时自动开启跨域放行" />
         </Field>
+        <Field
+          label="随应用启动"
+          hint="打开 Atelyx 时自动托管启动 ComfyUI 并等待就绪（加载模型可能较久）；服务已在运行时不会重复启动。仅托管模式生效。"
+        >
+          <Checkbox
+            checked={settings.autoStart}
+            onChange={(checked) => patch({ autoStart: checked })}
+            label="应用启动时自动启动 ComfyUI"
+          />
+        </Field>
         {settings.processMode === "managed" ? (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <Button

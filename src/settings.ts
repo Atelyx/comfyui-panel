@@ -24,6 +24,8 @@ export interface ComfySettings {
   extraArgs: string;
   /** 是否注入跨域放行参数：直连通道的前提，关掉只剩保底通道。 */
   autoCors: boolean;
+  /** 随插件装载自动托管启动（仅托管模式生效）。 */
+  autoStart: boolean;
   /** 落库子目录，留空则用仓库的附件目录。 */
   archiveFolder: string;
   /** 是否受理同一协作空间内其他成员的远程启停命令。 */
@@ -48,6 +50,7 @@ export const DEFAULT_SETTINGS: ComfySettings = {
   pythonPath: "",
   extraArgs: "",
   autoCors: true,
+  autoStart: false,
   archiveFolder: "",
   remoteEnabled: false,
   remoteTag: "",
@@ -75,6 +78,7 @@ function coerce(raw: unknown): ComfySettings {
     pythonPath: str("pythonPath", DEFAULT_SETTINGS.pythonPath),
     extraArgs: str("extraArgs", DEFAULT_SETTINGS.extraArgs),
     autoCors: bool("autoCors", DEFAULT_SETTINGS.autoCors),
+    autoStart: bool("autoStart", DEFAULT_SETTINGS.autoStart),
     archiveFolder: str("archiveFolder", DEFAULT_SETTINGS.archiveFolder),
     remoteEnabled: bool("remoteEnabled", DEFAULT_SETTINGS.remoteEnabled),
     remoteTag: str("remoteTag", DEFAULT_SETTINGS.remoteTag),

@@ -79,7 +79,13 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       notify();
       // 连接由插件持有而非面板持有：两个面板共用同一个运行时，若把断开挂在某个面板的
       // 清理里，切到另一个面板就会把连接掐断（表现为「明明连上了却显示未连接」）。
-      void runtime.connect();
+      const connected = runtime.connect();
+      // 随应用启动：先探测再决定——服务已在（如外部启动）时再拉进程只会抢端口失败退出。
+      if (loaded.autoStart && loaded.processMode === "managed") {
+        void connected.then(() => {
+          if (runtime.getSnapshot().channel !== "direct") void host.start(runtime);
+        });
+      }
     })
     .catch((err: unknown) => {
       pluginCtx.notification.notify({
