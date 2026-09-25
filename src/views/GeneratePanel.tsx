@@ -521,7 +521,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       setSavingKey(item.key);
       setActionError("");
       try {
-        const bytes = await runtime.imageBytes(item.ref);
+        const bytes = await runtime.resultImageBytes(item);
         const result = await archiveImage(ctx, bytes, item.ref);
         runtime.markSaved(item.key, result.path);
         ctx.notification.notify({

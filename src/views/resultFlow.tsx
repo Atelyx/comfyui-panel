@@ -93,11 +93,11 @@ export function RecordFlow(props: RecordFlowProps): unknown {
     setTopFade(el.scrollHeight > el.clientHeight + 4);
   }, []);
 
-  /** 预览右键「复制图片」：字节走直连通道，成败以 boolean 回给遮罩就地提示。 */
+  /** 预览右键「复制图片」：优先本地副本（服务重启后在线取不到 temp 图），成败就地提示。 */
   const copyPreviewImage = React.useCallback(
     async (item: ResultImage): Promise<boolean> => {
       try {
-        const dataUrl = await props.runtime.imageDataUrl(item.ref);
+        const dataUrl = await props.runtime.resultImageDataUrl(item);
         await props.ctx.clipboard.copyImage(dataUrl);
         return true;
       } catch {
@@ -122,7 +122,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
   const downloadPreviewImage = React.useCallback(
     async (item: ResultImage): Promise<boolean> => {
       try {
-        const dataUrl = await props.runtime.imageDataUrl(item.ref);
+        const dataUrl = await props.runtime.resultImageDataUrl(item);
         await props.ctx.native.invoke("save_image_to_downloads", {
           fileName: item.ref.filename,
           dataUrl,
@@ -133,6 +133,12 @@ export function RecordFlow(props: RecordFlowProps): unknown {
       }
     },
     [props.ctx, props.runtime],
+  );
+
+  /** 读记录的本地副本 dataURL；无副本或读取失败返回 null。 */
+  const resolveLocal = React.useCallback(
+    (item: ResultImage): Promise<string | null> => props.runtime.localImageDataUrl(item),
+    [props.runtime],
   );
 
   return (
@@ -201,6 +207,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
                         key={item.key}
                         item={item}
                         url={props.runtime.imageUrl(item.ref)}
+                        resolveLocal={resolveLocal}
                         saving={props.savingKey === item.key}
                         saveDisabled={props.saveDisabled}
                         onPreview={() => setPreviewKey(item.key)}
@@ -227,6 +234,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
           <PreviewOverlay
             item={previewed}
             url={props.runtime.imageUrl(previewed.ref, false)}
+            resolveLocal={resolveLocal}
             onClose={() => setPreviewKey(null)}
             onCopyImage={() => copyPreviewImage(previewed)}
             onDownloadImage={() => downloadPreviewImage(previewed)}
@@ -412,10 +420,32 @@ function formatTime(ts: number): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** 图片展示源：在线地址先行，加载失败降级本地副本，副本也没有就落占位。 */
+function useImageSrc(
+  onlineUrl: string,
+  item: ResultImage,
+  resolveLocal: (item: ResultImage) => Promise<string | null>,
+): { src: string; broken: boolean; onError: () => void } {
+  const [local, setLocal] = React.useState<string | null>(null);
+  const [broken, setBroken] = React.useState(false);
+  const resolvingRef = React.useRef(false);
+  const onError = React.useCallback((): void => {
+    if (local !== null || resolvingRef.current) return;
+    resolvingRef.current = true;
+    void resolveLocal(item).then((dataUrl) => {
+      resolvingRef.current = false;
+      if (dataUrl) setLocal(dataUrl);
+      else setBroken(true);
+    });
+  }, [local, item, resolveLocal]);
+  return { src: broken ? "" : local ?? onlineUrl, broken, onError };
+}
+
 /** 结果图格：按图片真实宽高比展示（加载后测量），悬停显示保存操作。 */
 function RecordImage(props: {
   item: ResultImage;
   url: string;
+  resolveLocal: (item: ResultImage) => Promise<string | null>;
   saving: boolean;
   saveDisabled: boolean;
   onPreview: () => void;
@@ -423,6 +453,7 @@ function RecordImage(props: {
 }): unknown {
   const [isHover, setHover] = React.useState(false);
   const [ratio, setRatio] = React.useState<number | null>(null);
+  const { src, broken, onError } = useImageSrc(props.url, props.item, props.resolveLocal);
   const aspect = ratio === null ? "1 / 1" : String(clampRatio(ratio));
   return (
     <div
@@ -438,25 +469,45 @@ function RecordImage(props: {
         background: "var(--hover)",
       }}
     >
-      <img
-        src={props.url}
-        alt={props.item.ref.filename}
-        loading="lazy"
-        onClick={props.onPreview}
-        onLoad={(e: { currentTarget: HTMLImageElement }) => {
-          const target = e.currentTarget;
-          if (target.naturalWidth > 0 && target.naturalHeight > 0) {
-            setRatio(target.naturalWidth / target.naturalHeight);
-          }
-        }}
-        style={{
-          width: "100%",
-          height: "100%",
-          objectFit: "cover",
-          display: "block",
-          cursor: "zoom-in",
-        }}
-      />
+      {broken ? (
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 4,
+            color: textMuted,
+            fontSize: 10,
+          }}
+        >
+          <ImageIcon size={16} />
+          图片已不在
+        </div>
+      ) : (
+        <img
+          src={src}
+          alt={props.item.ref.filename}
+          loading="lazy"
+          onClick={props.onPreview}
+          onError={onError}
+          onLoad={(e: { currentTarget: HTMLImageElement }) => {
+            const target = e.currentTarget;
+            if (target.naturalWidth > 0 && target.naturalHeight > 0) {
+              setRatio(target.naturalWidth / target.naturalHeight);
+            }
+          }}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            display: "block",
+            cursor: "zoom-in",
+          }}
+        />
+      )}
       {props.item.savedPath ? (
         <span
           title={props.item.savedPath}
@@ -539,12 +590,14 @@ const NOTICE_MS = 2500;
 function PreviewOverlay(props: {
   item: ResultImage;
   url: string;
+  resolveLocal: (item: ResultImage) => Promise<string | null>;
   onClose: () => void;
   onCopyImage: () => Promise<boolean>;
   onDownloadImage: () => Promise<boolean>;
 }): unknown {
   const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
   const [notice, setNotice] = React.useState<{ text: string; kind: "success" | "error" } | null>(null);
+  const { src, broken, onError } = useImageSrc(props.url, props.item, props.resolveLocal);
 
   React.useEffect(() => {
     if (!notice) return;
@@ -593,11 +646,19 @@ function PreviewOverlay(props: {
         cursor: "zoom-out",
       }}
     >
-      <img
-        src={props.url}
-        alt={props.item.ref.filename}
-        style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 6 }}
-      />
+      {broken ? (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: "#fff" }}>
+          <ImageIcon size={28} />
+          <span style={{ fontSize: FONT_SM }}>图片已不在：预览输出会随服务重启删除，且本图未留下副本</span>
+        </div>
+      ) : (
+        <img
+          src={src}
+          alt={props.item.ref.filename}
+          onError={onError}
+          style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 6 }}
+        />
+      )}
       {menu ? (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
           <ContextMenuItem

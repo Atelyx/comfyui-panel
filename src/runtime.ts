@@ -6,7 +6,7 @@
  * 否则切面板就断连接。更新一律换新对象，因为订阅方靠引用比较决定是否重渲染。
  */
 import { ComfyClient } from "./comfy/client";
-import { ComfySocket, bytesToBase64, type SocketHandlers } from "./comfy/socket";
+import { ComfySocket, base64ToBytes, bytesToBase64, type SocketHandlers } from "./comfy/socket";
 import { ComfyTransport, type Channel } from "./comfy/transport";
 import type {
   ApiPrompt,
@@ -18,10 +18,12 @@ import type {
   ObjectInfoMap,
   OutputEntry,
   ProgressPayload,
+  QueueItem,
   QueueSnapshot,
   StatusPayload,
   SystemStats,
 } from "./comfy/types";
+import { copyName, HISTORY_LIMIT, type HistoryPersist } from "./history";
 import { baseUrl, type ComfySettings } from "./settings";
 import {
   listWorkflows,
@@ -48,6 +50,8 @@ export interface ResultImage {
   failed: boolean;
   /** 保存到仓库后的回填路径。 */
   savedPath?: string;
+  /** 私有目录里的图片副本文件名；抓取失败时缺省，展示与取图落回直连。 */
+  local?: string;
 }
 
 export interface RuntimeSnapshot {
@@ -82,8 +86,6 @@ export interface RuntimeSnapshot {
 const QUEUE_POLL_MS = 2000;
 /** 工作流目录轮询：编排界面保存后几秒内感知，不必追求瞬时。 */
 const WORKFLOW_POLL_MS = 3000;
-/** 画廊保留上限。 */
-const MAX_RESULTS = 80;
 /** 首屏回填条数。 */
 const HISTORY_BOOTSTRAP = 30;
 
@@ -101,6 +103,9 @@ export class ComfyRuntime {
   private client: ComfyClient;
   private socket: ComfySocket | null = null;
   private clientId: string;
+  private readonly persist: HistoryPersist;
+  /** 本机实例 id：提交时打进 extra_data，队列与历史按它区分任务来源。 */
+  private originId = "";
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private workflowPollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly listeners = new Set<() => void>();
@@ -110,9 +115,10 @@ export class ComfyRuntime {
   /** 提交时记下的标题；历史回填的任务可能没有。 */
   private readonly titles = new Map<string, string>();
 
-  constructor(settings: ComfySettings) {
+  constructor(settings: ComfySettings, persist: HistoryPersist) {
     this.transport = new ComfyTransport(settings);
     this.client = new ComfyClient(this.transport);
+    this.persist = persist;
     this.clientId = randomClientId();
     this.snap = {
       settings,
@@ -153,6 +159,20 @@ export class ComfyRuntime {
       this.client = new ComfyClient(this.transport);
     }
     this.emit({});
+  }
+
+  /**
+   * 恢复持久化历史与本机实例 id。必须在 connect 之前调用：连接后的 /history 回填
+   * 按已恢复的记录去重，顺序反了会把恢复的记录当新任务重复折入。
+   */
+  async restore(): Promise<void> {
+    this.originId = await this.persist.loadOriginId();
+    const items = await this.persist.loadHistory();
+    if (items.length === 0) return;
+    for (const item of items) {
+      this.ingestedPrompts.add(item.promptId);
+    }
+    this.emit({ results: items });
   }
 
   /** 成功则接管轮询与长连接。 */
@@ -319,7 +339,7 @@ export class ComfyRuntime {
   async refreshQueue(): Promise<void> {
     try {
       const queue = await this.client.queue();
-      this.emit({ queue });
+      this.emit({ queue: filterQueue(queue, this.originId) });
     } catch {
       // 连接状态已由通道字段表达，单次轮询失败不值得打扰用户
     }
@@ -340,14 +360,67 @@ export class ComfyRuntime {
     for (const [promptId, entry] of Object.entries(history)) {
       if (this.ingestedPrompts.has(promptId)) continue;
       this.ingestedPrompts.add(promptId);
+      // 其他机器经同一服务提交的任务：只登记防重，不折进本机画廊
+      const origin = originOf(entry.prompt?.[3]);
+      if (origin !== null && origin !== this.originId) continue;
       fresh.push(...imagesOf(promptId, entry, this.titles.get(promptId) ?? ""));
     }
     if (fresh.length === 0) return;
+    this.captureCopies(fresh);
     // 按时间倒序并裁到上限：画廊不分页，超出丢弃最老的
-    const merged = [...fresh, ...this.snap.results]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, MAX_RESULTS);
-    this.emit({ results: merged });
+    this.commitResults(
+      [...fresh, ...this.snap.results].sort((a, b) => b.createdAt - a.createdAt).slice(0, HISTORY_LIMIT),
+    );
+  }
+
+  /**
+   * 折入画廊的当下抓图写字节副本：预览节点的输出随服务重启整目录删除，事后补不了。
+   * 回填在抓取完成后一次性做；失败的记录保留在线引用，服务重启后以占位展示。
+   * 插件在抓取期间重载的话本轮不回填（恢复的记录已按 promptId 去重，不会再折入），
+   * 这批图没有副本，属于可接受的窗口期损失。
+   */
+  private captureCopies(fresh: ResultImage[]): void {
+    void Promise.all(
+      fresh.map(async (item, index) => {
+        try {
+          const bytes = await this.client.imageBytes(item.ref);
+          const name = copyName(item.promptId, index, item.ref.filename);
+          await this.persist.saveImageCopy(name, bytes);
+          return { key: item.key, name };
+        } catch (err) {
+          console.warn("[comfyui-panel] 图片副本保存失败：", err);
+          return null;
+        }
+      }),
+    ).then((copies) => {
+      const hits = copies.filter((c): c is { key: string; name: string } => c !== null);
+      if (hits.length === 0) return;
+      const patch = new Map(hits.map((c) => [c.key, c.name]));
+      const items = this.snap.results.map((entry) => {
+        const name = patch.get(entry.key);
+        return name ? { ...entry, local: name } : entry;
+      });
+      // 记录在抓取期间被裁出上限的：入口没了，副本文件一并清掉
+      const kept = new Set(items.map((item) => item.key));
+      for (const [key, name] of patch) {
+        if (!kept.has(key)) void this.persist.deleteImageCopy(name);
+      }
+      if (items.some((item) => patch.has(item.key))) this.commitResults(items);
+    });
+  }
+
+  /** 结果变更的唯一出口：更新订阅方并把整表写进持久化，超出上限的副本文件一并清掉。 */
+  private commitResults(items: ResultImage[]): void {
+    const previous = this.snap.results;
+    this.emit({ results: items });
+    void this.persist.saveHistory(items).catch((err: unknown) => {
+      // 写盘失败不中断使用：本次会话内记录仍在，重启后这部分丢失
+      console.warn("[comfyui-panel] 生成历史写入失败：", err);
+    });
+    const keep = new Set(items.map((item) => item.local).filter((v): v is string => typeof v === "string"));
+    for (const item of previous) {
+      if (item.local && !keep.has(item.local)) void this.persist.deleteImageCopy(item.local);
+    }
   }
 
   async loadObjectInfo(): Promise<void> {
@@ -361,7 +434,7 @@ export class ComfyRuntime {
 
   /** 返回任务 id 供调用方在画廊里定位结果；失败抛错由调用方展示。 */
   async run(request: RunRequest): Promise<string> {
-    const result = await this.client.submit(request.prompt, this.clientId);
+    const result = await this.client.submit(request.prompt, this.clientId, this.originId);
     const promptId = result.prompt_id;
     if (!promptId) {
       throw new Error(result.error?.message ?? "提交失败：服务端未返回任务 id");
@@ -369,20 +442,24 @@ export class ComfyRuntime {
     // 标题必须在任务进历史前登记，否则轮询会先用兜底标题把它折进画廊；
     // 提交与轮询存在竞态，故这里还要回填已被折进去的结果。
     this.titles.set(promptId, request.title);
+    this.commitResults(
+      this.snap.results.map((item) =>
+        item.promptId === promptId && item.title !== request.title ? { ...item, title: request.title } : item,
+      ),
+    );
     this.emit({
       runningPromptId: promptId,
       error: "",
       progress: null,
-      results: this.snap.results.map((item) =>
-        item.promptId === promptId && item.title !== request.title ? { ...item, title: request.title } : item,
-      ),
     });
     void this.refreshQueue();
     return promptId;
   }
 
+  /** 中断当前显示的运行任务（按 promptId 定向，不波及同服务上其他来源的任务）。 */
   async interrupt(): Promise<void> {
-    await this.client.interrupt();
+    const promptId = this.snap.runningPromptId ?? this.snap.queue.queue_running[0]?.[1];
+    if (promptId) await this.client.interruptPrompt(promptId);
     this.emit({ progress: null });
     void this.refreshQueue();
   }
@@ -431,9 +508,33 @@ export class ComfyRuntime {
 
   /** 回填已落库路径。 */
   markSaved(key: string, savedPath: string): void {
-    this.emit({
-      results: this.snap.results.map((item) => (item.key === key ? { ...item, savedPath } : item)),
-    });
+    this.commitResults(
+      this.snap.results.map((item) => (item.key === key ? { ...item, savedPath } : item)),
+    );
+  }
+
+  /** 只读本地副本的 dataURL；无副本或读取失败返回 null，展示层据此落回直连或占位。 */
+  async localImageDataUrl(item: ResultImage): Promise<string | null> {
+    if (!item.local) return null;
+    try {
+      return await this.persist.readImageCopy(item.local);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 结果图 dataURL（预览里复制/下载用）：优先本地副本，服务重启后 temp 图只能从副本取。 */
+  async resultImageDataUrl(item: ResultImage): Promise<string> {
+    const local = await this.localImageDataUrl(item);
+    if (local) return local;
+    return this.imageDataUrl(item.ref);
+  }
+
+  /** 结果图字节（落库用）：优先本地副本，失败走直连。 */
+  async resultImageBytes(item: ResultImage): Promise<Uint8Array> {
+    const local = await this.localImageDataUrl(item);
+    if (local) return base64ToBytes(local.slice(local.indexOf(",") + 1));
+    return this.imageBytes(item.ref);
   }
 
   clearError(): void {
@@ -461,6 +562,27 @@ function randomClientId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** extra_data 里的来源标记（`atelyx_origin`）；无标记 = 其他客户端提交，对本机可见。 */
+function originOf(extra: unknown): string | null {
+  if (extra && typeof extra === "object") {
+    const origin = (extra as Record<string, unknown>).atelyx_origin;
+    if (typeof origin === "string" && origin) return origin;
+  }
+  return null;
+}
+
+/** 队列快照按来源过滤：其他机器提交的任务不进本机的队列展示。 */
+function filterQueue(queue: QueueSnapshot, originId: string): QueueSnapshot {
+  const visible = (item: QueueItem): boolean => {
+    const origin = originOf(item[3]);
+    return origin === null || origin === originId;
+  };
+  return {
+    queue_running: queue.queue_running.filter(visible),
+    queue_pending: queue.queue_pending.filter(visible),
+  };
 }
 
 /** 把历史条目里的图片拍平成画廊条目。 */

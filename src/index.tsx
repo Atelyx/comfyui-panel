@@ -10,6 +10,7 @@ import React from "react";
 import type { AtelyxCtx } from "./ctx";
 import { loadSettings, DEFAULT_SETTINGS, type ComfySettings } from "./settings";
 import { ComfyRuntime } from "./runtime";
+import { historyPersist } from "./history";
 import { HostController } from "./host/controller";
 import { RemoteControl } from "./host/remote";
 import { GeneratePanel } from "./views/GeneratePanel";
@@ -65,7 +66,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   void loadSettings(pluginCtx)
     .then((loaded) => {
       settings = loaded;
-      const runtime = new ComfyRuntime(loaded);
+      const runtime = new ComfyRuntime(loaded, historyPersist(pluginCtx));
       const host = new HostController(pluginCtx, loaded);
       const remote = new RemoteControl(pluginCtx, runtime, host, loaded);
       deps = {
@@ -77,15 +78,24 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       };
       detachRemote = remote.attach();
       notify();
+      // 先恢复持久化历史再连接：连接后的 /history 回填按已恢复记录去重，反了会重复折入。
+      // 恢复失败（键值存储不可用等）不堵连接：历史退化为本次会话内存态。
       // 连接由插件持有而非面板持有：两个面板共用同一个运行时，若把断开挂在某个面板的
       // 清理里，切到另一个面板就会把连接掐断（表现为「明明连上了却显示未连接」）。
-      const connected = runtime.connect();
-      // 随应用启动：先探测再决定——服务已在（如外部启动）时再拉进程只会抢端口失败退出。
-      if (loaded.autoStart && loaded.processMode === "managed") {
-        void connected.then(() => {
-          if (runtime.getSnapshot().channel !== "direct") void host.start(runtime);
+      void runtime
+        .restore()
+        .catch((err: unknown) => {
+          console.warn("[comfyui-panel] 生成历史恢复失败：", err);
+        })
+        .then(() => {
+          const connected = runtime.connect();
+          // 随应用启动：先探测再决定——服务已在（如外部启动）时再拉进程只会抢端口失败退出。
+          if (loaded.autoStart && loaded.processMode === "managed") {
+            void connected.then(() => {
+              if (runtime.getSnapshot().channel !== "direct") void host.start(runtime);
+            });
+          }
         });
-      }
     })
     .catch((err: unknown) => {
       pluginCtx.notification.notify({

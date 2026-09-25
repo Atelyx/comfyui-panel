@@ -23,9 +23,12 @@
     "bundle": true,
     "tagline": "把本机 ComfyUI 嵌进 Atelyx：编排、生成队列与结果落库",
     "atelyxVersionMin": "0.5.0",
+    "keepMountedOnVaultSwitch": true,
     "declares": [
       "shell",
       "state",
+      "storage",
+      "fs",
       "vault",
       "notification",
       "dialog",
@@ -37,10 +40,12 @@
     "permissions": {
       "shell": "按你的配置启动与停止 ComfyUI 进程（可在设置里改为「仅检测」不托管进程）",
       "state": "保存本插件的设置（地址/端口/启动方式/落库选项）",
+      "storage": "保存生成历史记录与本机任务标识，重启后仍可回看",
+      "fs": "把生成的图片写入插件私有目录留档，服务重启后仍可查看与保存",
       "vault": "把生成结果写入当前仓库的附件目录；清理落库过程中的临时文件",
       "notification": "启动失败、连接失败、落库结果等提示",
       "dialog": "选择 ComfyUI 安装目录与 Python 可执行文件",
-      "native": "调用宿主的附件导入命令，把生成结果的图片字节落进仓库附件目录（插件上下文没有二进制写盘通道）；调用下载命令把放大预览的图片存进系统 Downloads",
+      "native": "调用宿主的附件导入命令，把生成结果的图片字节落进仓库附件目录；调用下载命令把放大预览的图片存进系统 Downloads",
       "app": "读取宿主平台信息，决定启动命令的写法",
       "clipboard": "把工作流 API JSON 复制到剪贴板；把放大预览的图片复制到系统剪贴板",
       "collab": "经协作通道向同一协作空间内的其他成员收发启停 ComfyUI 的命令；开启「允许远程启动」后，同空间成员可以启动/停止本机 ComfyUI"

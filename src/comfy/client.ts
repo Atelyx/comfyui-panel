@@ -84,21 +84,19 @@ export class ComfyClient {
     return map[promptId] ?? null;
   }
 
-  /** 提交任务。`clientId` 与 WS 一致，服务端据此把进度推给本面板。 */
-  async submit(prompt: ApiPrompt, clientId: string): Promise<PromptSubmitResult> {
-    const result = await this.postJson<PromptSubmitResult>("/prompt", {
-      prompt,
-      client_id: clientId,
-    });
+  /**
+   * 提交任务。`clientId` 与 WS 一致，服务端据此把进度推给本面板。
+   * `originId` 进 `extra_data`（服务端原样保留到队列条目与历史），供多机共用同一
+   * ComfyUI 服务时区分任务来源；空串不带标记。
+   */
+  async submit(prompt: ApiPrompt, clientId: string, originId: string): Promise<PromptSubmitResult> {
+    const body: Record<string, unknown> = { prompt, client_id: clientId };
+    if (originId) body.extra_data = { atelyx_origin: originId };
+    const result = await this.postJson<PromptSubmitResult>("/prompt", body);
     return result ?? {};
   }
 
-  /** 中断当前执行（服务端会在下一个采样步停下）。 */
-  interrupt(): Promise<void> {
-    return this.postJson<void>("/interrupt", {});
-  }
-
-  /** 中断指定任务（只在该任务正在执行时才生效）。 */
+  /** 中断指定任务（无参全局中断会把同服务上其他来源的运行也停掉，故只提供定向中断）。 */
   interruptPrompt(promptId: string): Promise<void> {
     return this.postJson<void>("/interrupt", { prompt_id: promptId });
   }

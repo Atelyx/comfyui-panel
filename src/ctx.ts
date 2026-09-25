@@ -91,6 +91,21 @@ export interface AtelyxCtx extends Context {
     read(): Promise<unknown>;
     write(data: unknown): Promise<void>;
   };
+  /** 插件键值存储（独立于 state，整表落插件目录 kv.json；值须 JSON 可序列化）。 */
+  storage: {
+    get(key: string): Promise<unknown>;
+    set(key: string, value: unknown): Promise<void>;
+  };
+  /** 仓库外文件面：本插件私有目录免授权可用（卸载清除、更新保留）。 */
+  fs: {
+    /** 本插件私有目录的绝对路径（不存在则宿主创建）。 */
+    privateDir(): Promise<string>;
+    /** 原子写字节（base64 进出），缺失的父目录自动创建。 */
+    writeFileBase64(path: string, base64Data: string): Promise<VaultWriteResult>;
+    /** 读为 dataURL（mime 按扩展名推断）。 */
+    readFileDataUrl(path: string): Promise<string>;
+    deleteFile(path: string): Promise<VaultWriteResult>;
+  };
   shell: {
     /** 启动长驻进程并立即拿到句柄（不等进程结束）。 */
     spawn(
