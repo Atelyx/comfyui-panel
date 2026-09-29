@@ -49,8 +49,10 @@ export interface CollabMyPeer {
 export interface AtelyxEvents {
   /** 进仓/切仓完成广播；`root` 为 null 表示协作空间仓库（无本地根）。 */
   "vault:switch": { root: string | null };
-  /** 收到同一协作空间内其他成员发来的插件消息；不含自己。 */
-  "collab:message": { peerId: number; channel: string; payload: unknown };
+  /** 协作连接建立（含首连进房与断线重连）；成员重连后 peerId 会重新分配。 */
+  "collab:reconnected": Record<string, never>;
+  /** 协作接收队列被裁剪（本端消费过慢，帧已丢）。 */
+  "collab:resync": Record<string, never>;
   "collab:changed": { peers: CollabPeer[] };
 }
 
@@ -146,6 +148,10 @@ export interface AtelyxCtx extends Context {
     peers(): CollabPeer[];
     /** 发往同一协作空间内其他成员；`to` 指定则定向单播。返回是否已投递到传输层。 */
     sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
+    /** 订阅本插件的协作频道：handler 只收本频道入站消息（payload 为发送方原样透传的 JSON），
+     *  不含本端自己发出的消息；返回退订函数（随插件停用/卸载撤销）。
+     *  旧版宿主无此方法，插件须探测降级。 */
+    subscribe?(channel: string, handler: (peerId: number, payload: unknown) => void): () => void;
     myPeer(): CollabMyPeer;
     /** 声明本插件需要协作通道，返回释放函数（随插件停用/卸载撤销）。
      *  宿主只为有活跃声明的窗口维持协作连接；旧版宿主无此方法，插件须探测降级。 */

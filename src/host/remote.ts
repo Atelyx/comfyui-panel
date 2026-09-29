@@ -6,10 +6,12 @@
  *
  * 三条约束决定实现方式：
  * 1. 可达范围 = 同一协作空间。目标只能从 `ctx.collab.peers()` 里选，看不到的机器发不过去。
- * 2. 协作是尽力而为：`sendMessage` 返回「已投递到传输层」，对端在不在、处不处理都无从得知。
- *    因此每条启停命令都要两段回执（受理 + 结果）加超时，界面上的「启动中」不能靠猜。
- * 3. 传输可能重投同一帧。启停会真的拉起进程，重复执行会多出一个抢端口的实例，
- *    所以入站命令按 reqId 去重，重复帧只重放上次回执、不再执行。
+ * 2. `sendMessage` 返回「已投递到传输层」，对端在不在、处不处理都无从得知（通道可靠有序，
+ *    但断线期间的帧只有宿主补投兜着，补投缓存被挤出即丢，经 collab:resync 事件告知）。
+ *    因此每条启停命令都要两段回执（受理 + 结果）加超时，界面上的「启动中」不能靠猜；
+ *    丢帧时在途请求立即收口，不干等超时。
+ * 3. 帧可能重达（宿主断线补投会重放未确认的帧）。启停会真的拉起进程，重复执行会多出一个
+ *    抢端口的实例，所以入站命令按 reqId 去重，重复帧只重放上次回执、不再执行。
  */
 import type { AtelyxCtx, CollabMyPeer, CollabPeer } from "../ctx";
 import type { ComfySettings } from "../settings";
@@ -120,14 +122,27 @@ export class RemoteControl {
     this.settings = settings;
   }
 
-  /** 订阅协作入站消息；返回的撤销函数在插件停用时调用，之后不再受理远程命令。 */
+  /** 订阅协作入站消息并接线断线感知；返回的撤销函数在插件停用时调用，之后不再受理远程命令。 */
   attach(): () => void {
-    const off = this.ctx.events.on("collab:message", (event) => {
-      if (event.channel !== CHANNEL) return;
-      void this.handleInbound(event.peerId, event.payload);
-    });
+    const offs: Array<() => void> = [];
+    // 频道订阅面缺失（旧版宿主）时跳过订阅：远程启停入口会给出升级提示，不在这里让插件装载失败
+    if (typeof this.ctx.collab.subscribe === "function") {
+      offs.push(
+        this.ctx.collab.subscribe(CHANNEL, (peerId, payload) => {
+          void this.handleInbound(peerId, payload);
+        }),
+      );
+    }
+    // 丢帧说明在途回执可能已丢：立即收口在途请求，由各自的 catch 折进任务状态
+    offs.push(this.ctx.events.on("collab:resync", () => this.abortPending("协作通道消息丢失，请重试")));
+    // 重连后成员 peerId 重新分配，已展示的列表整体过期；没展示过不补扫，避免装载即广播
+    offs.push(
+      this.ctx.events.on("collab:reconnected", () => {
+        if (this.snap.machines.length > 0 || this.collector) void this.scan();
+      }),
+    );
     return () => {
-      off();
+      for (const off of offs) off();
       this.collector = null;
       this.abortPending("插件已停用");
     };
@@ -167,8 +182,8 @@ export class RemoteControl {
     } catch {
       me = null;
     }
-    // 意愿声明面与协作连接判定同批加入：缺它说明宿主不会为插件面板建立协作连接
-    if (!me || !this.ctx.collab.acquire) {
+    // 意愿声明面与频道订阅面缺一说明宿主过旧：不会为插件建立协作收发
+    if (!me || !this.ctx.collab.acquire || typeof this.ctx.collab.subscribe !== "function") {
       return "当前 Atelyx 版本不支持插件的协作通道，请升级 Atelyx 后使用远程启停";
     }
     if (me.peerId === null) {
