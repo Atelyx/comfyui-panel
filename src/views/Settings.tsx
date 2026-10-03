@@ -9,7 +9,7 @@ import type { AtelyxCtx } from "../ctx";
 import { DEFAULT_SETTINGS, saveSettings, type ComfySettings, type ProcessMode } from "../settings";
 import type { ComfyRuntime } from "../runtime";
 import type { HostController } from "../host/controller";
-import { Button, Card, Checkbox, Field, Notice, Select, TextInput, textMuted, textPrimary, FONT_SM } from "./ui";
+import { Button, Card, Checkbox, Field, Notice, Select, TextInput, textMuted, textPrimary, FONT_CAPTION, FONT_MICRO } from "./ui";
 
 interface SettingsProps {
   ctx: AtelyxCtx;
@@ -65,7 +65,7 @@ export function SettingsView(props: SettingsProps): unknown {
         maxHeight: "100%",
         overflowY: "auto",
         color: textPrimary,
-        fontSize: FONT_SM,
+        fontSize: FONT_CAPTION,
         boxSizing: "border-box",
       }}
     >
@@ -91,7 +91,7 @@ export function SettingsView(props: SettingsProps): unknown {
             }}
           />
         </Field>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: FONT_SM, color: textMuted }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: FONT_CAPTION, color: textMuted }}>
           <span>当前状态：{snapshot.channel === "direct" ? "已连接" : "未连接"}</span>
         </div>
       </Card>
@@ -145,21 +145,21 @@ export function SettingsView(props: SettingsProps): unknown {
         {settings.processMode === "managed" ? (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <Button
-              tone="primary"
+              variant="primary"
               onClick={() => void host.start(runtime)}
               disabled={hostSnapshot.starting || hostSnapshot.running}
             >
               {hostSnapshot.starting ? "启动中…" : "启动 ComfyUI"}
             </Button>
-            <Button tone="danger" onClick={() => void host.stop()} disabled={!hostSnapshot.running}>
+            <Button variant="danger" onClick={() => void host.stop()} disabled={!hostSnapshot.running}>
               停止 ComfyUI
             </Button>
-            <span style={{ fontSize: FONT_SM, color: textMuted }}>
+            <span style={{ fontSize: FONT_CAPTION, color: textMuted }}>
               {hostSnapshot.running ? "插件已启动该进程" : "当前进程不由插件管理"}
             </span>
           </div>
         ) : (
-          <div style={{ fontSize: FONT_SM, color: textMuted }}>
+          <div style={{ fontSize: FONT_CAPTION, color: textMuted }}>
             外部模式：自行启动并带 --enable-cors-header
           </div>
         )}
@@ -186,7 +186,7 @@ export function SettingsView(props: SettingsProps): unknown {
             placeholder="留空使用设备名"
           />
         </Field>
-        <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
+        <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.6 }}>
           停止不受上面的开关限制：远程拉起的进程仍可被远程收掉，否则对端会留下一个它自己收不回的进程。
           <br />
           在生成面板工具栏的「远程」里启停其他机器；本机要连哪台机器，在「连接」里自行填对方的局域网地址与端口。
@@ -201,12 +201,12 @@ export function SettingsView(props: SettingsProps): unknown {
             placeholder="留空使用仓库附件目录"
           />
         </Field>
-        <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
+        <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.6 }}>
           协作空间仓库暂不支持保存，生成结果只能在个人仓库落库。
         </div>
       </Card>
 
-      <div style={{ color: textMuted, fontSize: 11, lineHeight: 1.6 }}>
+      <div style={{ color: textMuted, fontSize: FONT_MICRO, lineHeight: 1.6 }}>
         默认：{DEFAULT_SETTINGS.host}:{DEFAULT_SETTINGS.port}
       </div>
     </div>

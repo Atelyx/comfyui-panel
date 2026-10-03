@@ -9,7 +9,7 @@
  */
 import React from "react";
 import type { RemoteControl, RemoteMachine } from "../host/remote";
-import { Button, Notice, StatusDot, bgSecondary, border, textMuted, textPrimary, FONT_SM } from "./ui";
+import { Button, Notice, StatusPill, border, danger, textMuted, textPrimary, FONT_CAPTION, FONT_MICRO, FLOAT_STYLE } from "./ui";
 
 /** 弹层打开期间的状态刷新间隔；对方启停后几秒内列表跟上即可。 */
 const REFRESH_MS = 10000;
@@ -43,7 +43,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
 
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
-      <Button onClick={() => setOpen((current) => !current)} active={open} title="经协作通道启停同一协作空间内其他机器上的 ComfyUI">
+      <Button size="sm" onClick={() => setOpen((current) => !current)} active={open} title="经协作通道启停同一协作空间内其他机器上的 ComfyUI">
         远程
         {remoteCount > 0 ? ` ${remoteCount}` : ""}
       </Button>
@@ -59,19 +59,16 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            borderRadius: 8,
-            border: `1px solid ${border}`,
-            background: bgSecondary,
-            boxShadow: "0 10px 32px rgba(0,0,0,0.22)",
+            ...FLOAT_STYLE,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <StatusDot
+            <StatusPill
               tone={snapshot.scanning ? "idle" : snapshot.error ? "bad" : "ok"}
               label={snapshot.scanning ? "查询中…" : snapshot.error ? "通道不可用" : "协作通道"}
             />
             <span style={{ flex: 1 }} />
-            <Button onClick={() => void remote.scan()} disabled={snapshot.scanning}>
+            <Button size="sm" variant="ghost" onClick={() => void remote.scan()} disabled={snapshot.scanning}>
               刷新
             </Button>
           </div>
@@ -79,7 +76,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
           {snapshot.error ? <Notice tone="warn">{snapshot.error}</Notice> : null}
 
           {snapshot.machines.length === 0 && !snapshot.error ? (
-            <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.6 }}>
+            <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.6 }}>
               同一协作空间内没有其他成员。远程启停要求两台机器都启用协作、进入同一个协作空间，且对端装了本插件。
             </div>
           ) : snapshot.machines.length === 0 ? null : (
@@ -110,20 +107,20 @@ function MachineRow(props: { machine: RemoteMachine; remote: RemoteControl }): u
             background: machine.color || textMuted,
           }}
         />
-        <span style={{ fontSize: FONT_SM, color: textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: FONT_CAPTION, color: textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {machine.nickname}
         </span>
         <span style={{ flex: 1 }} />
-        <StatusDot tone={phaseTone(machine)} label={phaseLabel(machine)} />
+        <StatusPill tone={phaseTone(machine)} label={phaseLabel(machine)} />
       </div>
 
-      <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.5 }}>{describeMachine(machine)}</div>
+      <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.5 }}>{describeMachine(machine)}</div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <Button
           onClick={() => void remote.startRemote(machine)}
           disabled={!canStart}
-          tone="primary"
+          variant="primary"
           title={startHint(machine)}
         >
           {busy && task?.kind === "start" ? "启动中…" : "启动"}
@@ -131,18 +128,18 @@ function MachineRow(props: { machine: RemoteMachine; remote: RemoteControl }): u
         <Button
           onClick={() => void remote.stopRemote(machine)}
           disabled={!canStop}
-          tone="danger"
+          variant="danger"
           title={stopHint(machine)}
         >
           {busy && task?.kind === "stop" ? "停止中…" : "停止"}
         </Button>
         {machine.port > 0 ? (
-          <span style={{ fontSize: 11, color: textMuted }}>端口 {machine.port}</span>
+          <span style={{ fontSize: FONT_MICRO, color: textMuted }}>端口 {machine.port}</span>
         ) : null}
       </div>
 
       {task ? (
-        <div style={{ fontSize: 11, color: task.stage === "failed" ? "#e5534b" : textMuted, lineHeight: 1.5 }}>
+        <div style={{ fontSize: FONT_MICRO, color: task.stage === "failed" ? danger : textMuted, lineHeight: 1.5 }}>
           {task.message}
         </div>
       ) : null}

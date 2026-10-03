@@ -5,9 +5,9 @@
  * 保持最新——编排界面里保存的修改几秒内会出现在这里。选中文件被外部改动时：
  * 本地没改过参数就自动重载，改过则提示手动重载，不覆盖用户正在调的参数。
  *
- * 布局：结果记录流占据主体（顶部，按每次生成分组）；底部是生成坞——参考图（绑定工作流里
- * 的 LoadImage 节点）+ 大提示词输入 + 圆形生成按钮、常用参数条（只取未连线字段，缺哪个
- * 隐藏哪个）、高级参数折叠区（节点分组全量表单）。未加载工作流时退化为空态提示。
+ * 布局：结果记录流占据主体（顶部，按每次生成分组）；底部是生成坞——下沉输入盒（参考图
+ * （绑定工作流里的 LoadImage 节点）+ 大提示词输入 + 常用参数与生成按钮的工具排）、高级参数
+ * 折叠区（节点分组全量表单）。未加载工作流时退化为空态提示。
  */
 import React from "react";
 import type { AtelyxCtx } from "../ctx";
@@ -47,6 +47,9 @@ import {
   CollapseCard,
   CopyIcon,
   Empty,
+  FLOAT_STYLE,
+  FONT_CAPTION,
+  FONT_MICRO,
   Notice,
   Panel,
   PlayIcon,
@@ -54,7 +57,7 @@ import {
   SearchIcon,
   Select,
   SquareIcon,
-  StatusDot,
+  StatusPill,
   AutoTextArea,
   SCROLL_LIST_CLASS,
   SCROLLBAR_CSS,
@@ -64,15 +67,15 @@ import {
   UploadIcon,
   ZapIcon,
   accent,
-  accentFg,
-  bgPrimary,
+  accentSoft,
   bgSecondary,
+  bgSunken,
   border,
+  borderSubtle,
   hover,
   textMuted,
   textPrimary,
   textSecondary,
-  FONT_SM,
 } from "./ui";
 
 interface GeneratePanelProps {
@@ -551,14 +554,14 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
     <Panel
       toolbar={
         <Toolbar>
-          <StatusDot
+          <StatusPill
             tone={snapshot.channel === "direct" ? "ok" : "bad"}
             label={
               snapshot.channel === "direct" ? "已连接" : snapshot.probing ? "连接中…" : "未连接"
             }
           />
           {snapshot.systemStats?.devices?.[0]?.name ? (
-            <span style={{ fontSize: 11, color: textMuted }}>{snapshot.systemStats.devices[0].name}</span>
+            <span style={{ fontSize: FONT_MICRO, color: textMuted }}>{snapshot.systemStats.devices[0].name}</span>
           ) : null}
           <Select
             value={activeId}
@@ -569,26 +572,26 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 ? [{ value: "", label: "尚无工作流" }]
                 : workflows.map((item) => ({ value: item.path, label: workflowDisplayName(item.path) }))
             }
-            style={{ maxWidth: 240, flex: 1 }}
+            style={{ maxWidth: 240, flex: 1, height: 24 }}
           />
           <span style={{ flex: 1 }} />
           <RemoteEntry remote={remote} />
-          <Button onClick={() => void runtime.freeMemory()} disabled={offline} title="释放模型/显存，不影响队列">
+          <Button size="sm" onClick={() => void runtime.freeMemory()} disabled={offline} title="释放模型/显存，不影响队列">
             <ZapIcon size={12} />
             释放显存
           </Button>
-          <Button onClick={() => void runtime.connect()} disabled={snapshot.probing}>
+          <Button size="sm" onClick={() => void runtime.connect()} disabled={snapshot.probing}>
             <RefreshIcon size={12} />
             刷新连接
           </Button>
           {snapshot.settings.processMode === "managed" ? (
             hostSnapshot.running ? (
-              <Button tone="danger" onClick={() => void host.stop()}>
+              <Button size="sm" variant="danger" onClick={() => void host.stop()}>
                 <SquareIcon size={12} />
                 停止服务
               </Button>
             ) : (
-              <Button onClick={() => void host.start(runtime)} disabled={hostSnapshot.starting}>
+              <Button size="sm" onClick={() => void host.start(runtime)} disabled={hostSnapshot.starting}>
                 <PlayIcon size={12} />
                 {hostSnapshot.starting ? "启动中…" : "启动服务"}
               </Button>
@@ -598,7 +601,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       }
     >
       {actionError ? (
-        <div style={{ padding: "8px 10px 0" }}>
+        <div style={{ padding: "8px 12px 0" }}>
           <Notice tone="error" onClose={() => setActionError("")}>
             {actionError}
           </Notice>
@@ -606,24 +609,24 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       ) : null}
       <style>{SCROLLBAR_CSS}</style>
       {snapshot.error ? (
-        <div style={{ padding: "8px 10px 0" }}>
+        <div style={{ padding: "8px 12px 0" }}>
           <Notice tone="error" onClose={() => runtime.clearError()}>
             {snapshot.error}
           </Notice>
         </div>
       ) : null}
       {fileUpdated ? (
-        <div style={{ padding: "8px 10px 0" }}>
+        <div style={{ padding: "8px 12px 0" }}>
           <Notice tone="warn" onClose={() => setFileUpdated(false)}>
             工作流文件已在编排界面更新；你正在调参的改动会被保留
             <span style={{ display: "inline-flex", marginLeft: 8 }}>
-              <Button onClick={reloadActive}>重新载入</Button>
+              <Button size="sm" onClick={reloadActive}>重新载入</Button>
             </span>
           </Notice>
         </div>
       ) : null}
       {loadError ? (
-        <div style={{ padding: "8px 10px 0" }}>
+        <div style={{ padding: "8px 12px 0" }}>
           <Notice tone="error" onClose={() => setLoadError("")}>
             {loadError}；该工作流请在编排界面打开
           </Notice>
@@ -633,40 +636,19 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       {!draft ? (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {offline ? (
-            <Empty hint="连接后自动发现 ComfyUI 目录里的工作流">
-              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-                <UploadIcon size={22} />
-                未连接
-              </span>
-            </Empty>
+            <Empty icon={<UploadIcon size={18} />} title="未连接" description="连接后自动发现 ComfyUI 目录里的工作流" />
           ) : snapshot.workflowsError ? (
-            <Empty hint="工作流列表来自 ComfyUI 目录接口">
-              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-                <UploadIcon size={22} />
-                {snapshot.workflowsError}
-              </span>
-            </Empty>
+            <Empty icon={<UploadIcon size={18} />} title={snapshot.workflowsError} description="工作流列表来自 ComfyUI 目录接口" />
           ) : workflows.length === 0 ? (
-            <Empty hint="在编排界面保存的工作流会自动出现在这里">
-              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-                <UploadIcon size={22} />
-                还没有工作流
-              </span>
-            </Empty>
+            <Empty
+              icon={<UploadIcon size={18} />}
+              title="还没有工作流"
+              description="在编排界面保存的工作流会自动出现在这里"
+            />
           ) : loadError ? (
-            <Empty hint="该工作流请在编排界面打开">
-              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-                <UploadIcon size={22} />
-                无法在生成面板使用
-              </span>
-            </Empty>
+            <Empty icon={<UploadIcon size={18} />} title="无法在生成面板使用" description="该工作流请在编排界面打开" />
           ) : (
-            <Empty hint="文件读取失败">
-              <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-                <UploadIcon size={22} />
-                读取失败
-              </span>
-            </Empty>
+            <Empty icon={<UploadIcon size={18} />} title="读取失败" description="文件读取失败，请刷新连接重试" />
           )}
         </div>
       ) : (
@@ -685,29 +667,29 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             onInterrupt={() => void runtime.interrupt()}
           />
 
-          {/* 底部生成坞：高度吃紧时自身让出空间给记录流，高级区内部滚动 */}
+          {/* 底部生成坞：高度吃紧时自身让出空间给记录流，高级区内部滚动。
+              输入盒是坞里唯一的盒子（sunken 下沉面），参数与高级区铺在坞面上不另起盒 */}
           <div
             style={{
               display: "flex",
               flexDirection: "column",
               minHeight: 0,
               flexShrink: 1,
+              gap: 8,
               borderTop: `1px solid ${border}`,
               background: bgSecondary,
-              paddingBottom: 8,
+              padding: "8px 12px",
             }}
           >
             <div
               style={{
                 display: "flex",
-                alignItems: "stretch",
-                gap: 10,
-                margin: 8,
-                padding: 10,
-                borderRadius: 14,
+                flexDirection: "column",
+                gap: 6,
+                padding: "8px 10px",
+                borderRadius: "var(--radius-md)",
                 border: `1px solid ${border}`,
-                background: bgPrimary,
-                boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
+                background: bgSunken,
                 flexShrink: 0,
               }}
             >
@@ -730,206 +712,175 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                     : "该工作流没有提示词字段，请到高级参数或编排界面调整"
                 }
                 disabled={!promptField}
-                minHeight={60}
+                minHeight={44}
                 maxHeight={160}
                 style={{ flex: 1, minWidth: 0 }}
               />
-              <button
-                type="button"
-                onClick={doRun}
-                disabled={!draft || busy || offline}
-                title={busy ? "提交中…" : "生成"}
-                style={{
-                  alignSelf: "center",
-                  width: 44,
-                  height: 44,
-                  borderRadius: 22,
-                  border: "none",
-                  flexShrink: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  background: !draft || busy || offline ? hover : accent,
-                  color: accentFg,
-                  cursor: !draft || busy || offline ? "not-allowed" : "pointer",
-                }}
-              >
-                <PlayIcon size={18} />
-              </button>
-            </div>
-
-            {/* 常用参数条 */}
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: "6px 12px",
-                alignItems: "flex-start",
-                padding: "0 10px 8px",
-                flexShrink: 0,
-              }}
-            >
-              {sizeSections.length > 0 ? (
-                <SizePicker
-                  display={sizeDisplay.join(" · ")}
-                  title={sizeTitle}
-                  disabled={offline}
-                  sections={sizeSections}
-                />
-              ) : null}
-              {stepsField ? (
-                <ParamControl label="步数">
-                  <NumberControl field={stepsField} value={readField(draft, stepsField)} onChange={(raw) => setFieldValue(stepsField, raw)} />
-                </ParamControl>
-              ) : null}
-              {cfgField ? (
-                <ParamControl label="CFG">
-                  <NumberControl field={cfgField} value={readField(draft, cfgField)} onChange={(raw) => setFieldValue(cfgField, raw)} />
-                </ParamControl>
-              ) : null}
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+                {sizeSections.length > 0 ? (
+                  <SizePicker
+                    display={sizeDisplay.join(" · ")}
+                    title={sizeTitle}
+                    disabled={offline}
+                    sections={sizeSections}
+                  />
+                ) : null}
+                {stepsField ? (
+                  <ParamControl label="步数">
+                    <NumberControl field={stepsField} value={readField(draft, stepsField)} onChange={(raw) => setFieldValue(stepsField, raw)} />
+                  </ParamControl>
+                ) : null}
+                {cfgField ? (
+                  <ParamControl label="CFG">
+                    <NumberControl field={cfgField} value={readField(draft, cfgField)} onChange={(raw) => setFieldValue(cfgField, raw)} />
+                  </ParamControl>
+                ) : null}
+                <span style={{ flex: 1 }} />
+                <Button
+                  variant="primary"
+                  onClick={doRun}
+                  disabled={!draft || busy || offline}
+                  title={busy ? "提交中…" : "生成"}
+                >
+                  <PlayIcon size={13} />
+                  生成
+                </Button>
+              </div>
             </div>
 
             {/* 高级参数折叠区：展开时占满生成坞剩余高度，内容超高内部滚动 */}
-            <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1, padding: "0 10px" }}>
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  minHeight: 0,
-                  flex: 1,
-                  border: `1px solid ${border}`,
-                  borderRadius: 8,
-                  background: bgPrimary,
-                  overflow: "hidden",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", flexShrink: 0 }}>
-                  <button
-                    type="button"
-                    onClick={() => setAdvancedOpen(!advancedOpen)}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                      border: "none",
-                      background: "transparent",
-                      color: textPrimary,
-                      fontSize: FONT_SM,
-                      cursor: "pointer",
-                      padding: "2px 0",
-                    }}
-                  >
-                    {advancedOpen ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
-                    高级参数
-                  </button>
-                  <span style={{ fontSize: 10, color: textMuted }}>
-                    {Object.keys(draft).length} 节点 · {fields.length} 项参数
-                  </span>
-                  <span style={{ flex: 1 }} />
-                  <Button onClick={copyJson} disabled={!active} title="复制这份工作流的 API JSON">
-                    <CopyIcon size={12} />
-                    复制 JSON
-                  </Button>
-                  <Button
-                    onClick={doSaveParams}
-                    disabled={!active || !draft || busy || offline}
-                    title="把当前参数写回工作流文件"
-                  >
-                    保存参数
-                  </Button>
-                  <Button
-                    onClick={reloadActive}
-                    disabled={!activeId || offline}
-                    title="放弃本地参数改动，读回工作流文件里的参数"
-                  >
-                    重新加载
-                  </Button>
-                </div>
-                {advancedOpen ? (
-                  <div
-                    className={SCROLL_LIST_CLASS}
-                    style={{
-                      padding: "8px 10px 10px",
-                      borderTop: `1px solid ${border}`,
-                      flex: 1,
-                      minHeight: 0,
-                      overflowY: "auto",
-                    }}
-                  >
-                    {candidatePrompts.length > 1 || promptFieldKey ? (
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                        <span style={{ fontSize: FONT_SM, color: textSecondary, flexShrink: 0 }}>主提示词</span>
-                        <Select
-                          value={promptSelectValue}
-                          onChange={setPromptFieldKey}
-                          options={[
-                            { value: "", label: "自动（第一个提示词字段）" },
-                            ...candidatePrompts.map((f) => ({
-                              value: fieldKey(f),
-                              label: `${f.nodeLabel} · ${fieldLabel(f)}`,
-                            })),
-                          ]}
-                          title="底部大输入框绑定的提示词字段；有多个提示词节点时手动指定"
-                        />
-                      </div>
-                    ) : null}
-                    {countDisabledNodes(draft) > 0 ? (
-                      <div style={{ marginBottom: 8 }}>
-                        <Notice tone="warn">存在被禁用/跳过的节点，结果异常请回 ComfyUI 确认</Notice>
-                      </div>
-                    ) : null}
-                    <div style={{ position: "relative", marginBottom: 8 }}>
-                      <span
-                        style={{
-                          position: "absolute",
-                          left: 8,
-                          top: "50%",
-                          transform: "translateY(-50%)",
-                          display: "inline-flex",
-                          color: textMuted,
-                          pointerEvents: "none",
-                        }}
-                      >
-                        <SearchIcon size={12} />
-                      </span>
-                      <TextInput
-                        value={filter}
-                        onChange={setFilter}
-                        placeholder="筛选参数…"
-                        title="按参数名、节点名或节点类型筛选"
-                        style={{ paddingLeft: 26 }}
+            <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpen(!advancedOpen)}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    border: "none",
+                    background: "transparent",
+                    color: textPrimary,
+                    fontSize: FONT_CAPTION,
+                    fontWeight: 500,
+                    cursor: "pointer",
+                    padding: "2px 0",
+                  }}
+                >
+                  {advancedOpen ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+                  高级参数
+                </button>
+                <span style={{ fontSize: FONT_MICRO, color: textMuted }}>
+                  {Object.keys(draft).length} 节点 · {fields.length} 项参数
+                </span>
+                <span style={{ flex: 1 }} />
+                <Button size="sm" variant="ghost" onClick={copyJson} disabled={!active} title="复制这份工作流的 API JSON">
+                  <CopyIcon size={12} />
+                  复制 JSON
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={doSaveParams}
+                  disabled={!active || !draft || busy || offline}
+                  title="把当前参数写回工作流文件"
+                >
+                  保存参数
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={reloadActive}
+                  disabled={!activeId || offline}
+                  title="放弃本地参数改动，读回工作流文件里的参数"
+                >
+                  重新加载
+                </Button>
+              </div>
+              {advancedOpen ? (
+                <div
+                  className={SCROLL_LIST_CLASS}
+                  style={{
+                    marginTop: 6,
+                    padding: 8,
+                    borderTop: `1px solid ${borderSubtle}`,
+                    flex: 1,
+                    minHeight: 0,
+                    overflowY: "auto",
+                  }}
+                >
+                  {candidatePrompts.length > 1 || promptFieldKey ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <span style={{ fontSize: FONT_CAPTION, color: textSecondary, flexShrink: 0 }}>主提示词</span>
+                      <Select
+                        value={promptSelectValue}
+                        onChange={setPromptFieldKey}
+                        options={[
+                          { value: "", label: "自动（第一个提示词字段）" },
+                          ...candidatePrompts.map((f) => ({
+                            value: fieldKey(f),
+                            label: `${f.nodeLabel} · ${fieldLabel(f)}`,
+                          })),
+                        ]}
+                        title="底部大输入框绑定的提示词字段；有多个提示词节点时手动指定"
                       />
                     </div>
-                    {visibleFields.length === 0 ? (
-                      <div style={{ padding: "16px 0", textAlign: "center", fontSize: FONT_SM, color: textMuted }}>
-                        没有匹配的参数
-                      </div>
-                    ) : (
-                      nodeGroups.map(([nodeId, nodeFields]) => (
-                        <CollapseCard
-                          key={nodeId}
-                          title={nodeFields[0]?.nodeLabel ?? nodeId}
-                          subtitle={nodeFields[0]?.classType ?? ""}
-                          badge={`${nodeFields.length} 字段`}
-                          open={hasFilter || !collapsed.has(nodeId)}
-                          onToggle={() => toggleCollapsed(nodeId)}
-                        >
-                          {nodeFields.map((field) => (
-                            <FieldRow
-                              key={fieldKey(field)}
-                              field={field}
-                              value={readField(draft, field)}
-                              seedChecked={seedMode.has(fieldKey(field))}
-                              onToggleSeed={() => toggleSeed(field)}
-                              onChange={(raw) => setFieldValue(field, raw)}
-                            />
-                          ))}
-                        </CollapseCard>
-                      ))
-                    )}
+                  ) : null}
+                  {countDisabledNodes(draft) > 0 ? (
+                    <div style={{ marginBottom: 8 }}>
+                      <Notice tone="warn">存在被禁用/跳过的节点，结果异常请回 ComfyUI 确认</Notice>
+                    </div>
+                  ) : null}
+                  <div style={{ position: "relative", marginBottom: 8 }}>
+                    <span
+                      style={{
+                        position: "absolute",
+                        left: 8,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        display: "inline-flex",
+                        color: textMuted,
+                        pointerEvents: "none",
+                      }}
+                    >
+                      <SearchIcon size={12} />
+                    </span>
+                    <TextInput
+                      value={filter}
+                      onChange={setFilter}
+                      placeholder="筛选参数…"
+                      title="按参数名、节点名或节点类型筛选"
+                      style={{ paddingLeft: 26 }}
+                    />
                   </div>
-                ) : null}
-              </div>
+                  {visibleFields.length === 0 ? (
+                    <div style={{ padding: "16px 0", textAlign: "center", fontSize: FONT_CAPTION, color: textMuted }}>
+                      没有匹配的参数
+                    </div>
+                  ) : (
+                    nodeGroups.map(([nodeId, nodeFields]) => (
+                      <CollapseCard
+                        key={nodeId}
+                        title={nodeFields[0]?.nodeLabel ?? nodeId}
+                        subtitle={nodeFields[0]?.classType ?? ""}
+                        badge={`${nodeFields.length} 字段`}
+                        open={hasFilter || !collapsed.has(nodeId)}
+                        onToggle={() => toggleCollapsed(nodeId)}
+                      >
+                        {nodeFields.map((field) => (
+                          <FieldRow
+                            key={fieldKey(field)}
+                            field={field}
+                            value={readField(draft, field)}
+                            seedChecked={seedMode.has(fieldKey(field))}
+                            onToggleSeed={() => toggleSeed(field)}
+                            onChange={(raw) => setFieldValue(field, raw)}
+                          />
+                        ))}
+                      </CollapseCard>
+                    ))
+                  )}
+                </div>
+              ) : null}
             </div>
           </div>
         </>
@@ -979,7 +930,7 @@ function mpSizeOptions(
 /** 主参数条里的一个带标签控件。 */
 function ParamControl(props: { label: string; children: unknown }): unknown {
   return (
-    <span style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 10, color: textMuted }}>
+    <span style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: FONT_MICRO, color: textMuted }}>
       <span>{props.label}</span>
       {props.children}
     </span>
@@ -1057,7 +1008,7 @@ function SizePicker(props: {
         display: "flex",
         flexDirection: "column",
         gap: 2,
-        fontSize: 10,
+        fontSize: FONT_MICRO,
         color: textMuted,
       }}
     >
@@ -1071,12 +1022,14 @@ function SizePicker(props: {
           display: "inline-flex",
           alignItems: "center",
           gap: 4,
-          padding: "4px 10px",
-          borderRadius: 6,
-          border: `1px solid ${border}`,
-          background: open ? hover : "transparent",
+          height: 24,
+          padding: "0 8px",
+          borderRadius: "var(--radius-sm)",
+          border: `1px solid var(--input-border)`,
+          background: open ? hover : "var(--input-bg)",
           color: textPrimary,
-          fontSize: FONT_SM,
+          fontSize: FONT_MICRO,
+          fontWeight: 500,
           fontFamily: "inherit",
           cursor: props.disabled ? "not-allowed" : "pointer",
           opacity: props.disabled ? 0.5 : 1,
@@ -1098,15 +1051,12 @@ function SizePicker(props: {
             display: "flex",
             flexDirection: "column",
             gap: 10,
-            borderRadius: 8,
-            border: `1px solid ${border}`,
-            background: bgSecondary,
-            boxShadow: "0 10px 32px rgba(0,0,0,0.22)",
+            ...FLOAT_STYLE,
           }}
         >
           {props.sections.map((section) => (
             <div key={section.label} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={{ fontSize: 10, color: textMuted }}>{section.label}</span>
+              <span style={{ fontSize: FONT_MICRO, color: textMuted }}>{section.label}</span>
               <OptionRow options={section.options} value={section.value} onChange={section.onChange} />
             </div>
           ))}
@@ -1116,12 +1066,14 @@ function SizePicker(props: {
   );
 }
 
-/** 面板内的一行选项按钮（自动换行，选项可带 title 提示）。 */
+/** 面板内的一行选项按钮（自动换行，选项可带 title 提示）；
+ *  选中态 = accent-soft 底 + 左缘金色 inset 条 + 强调色文字（宿主列表选中同式）。 */
 function OptionRow(props: {
   options: Array<{ value: string; label: string; title?: string }>;
   value: string;
   onChange: (value: string) => void;
 }): unknown {
+  const [hovered, setHovered] = React.useState<string | null>(null);
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
       {props.options.map((option) => {
@@ -1132,14 +1084,17 @@ function OptionRow(props: {
             type="button"
             title={option.title}
             onClick={() => props.onChange(option.value)}
+            onMouseEnter={() => setHovered(option.value)}
+            onMouseLeave={() => setHovered(null)}
             style={{
-              border: `1px solid ${active ? accent : border}`,
-              borderRadius: 6,
+              border: `1px solid ${active ? "color-mix(in srgb, var(--accent) 35%, transparent)" : border}`,
+              borderRadius: "var(--radius-xs)",
               padding: "3px 8px",
-              fontSize: FONT_SM,
+              fontSize: FONT_CAPTION,
               fontFamily: "inherit",
-              background: active ? accent : "transparent",
-              color: active ? accentFg : textSecondary,
+              background: active ? accentSoft : hovered === option.value ? hover : "transparent",
+              boxShadow: active ? "inset 2px 0 0 var(--accent)" : undefined,
+              color: active ? accent : textSecondary,
               cursor: "pointer",
               whiteSpace: "nowrap",
             }}
@@ -1192,7 +1147,7 @@ function FieldRow(props: {
     <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
       <span
         style={{
-          fontSize: 11,
+          fontSize: FONT_MICRO,
           color: textSecondary,
           overflow: "hidden",
           textOverflow: "ellipsis",

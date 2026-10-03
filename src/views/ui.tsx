@@ -1,31 +1,58 @@
 /**
  * 界面原语：面板共用的样式与小组件。
  *
- * 样式只用内联 style + Atelyx的 CSS 变量，不依赖 Tailwind（插件没有构建期的类名提取，
- * Tailwind 类不会生效）；颜色走变量而非硬编码，才能跟随用户主题变化。
+ * 样式只用内联 style + 宿主 CSS 变量，不依赖 Tailwind（插件没有构建期的类名提取，
+ * Tailwind 类不会生效）；颜色、字号、圆角、动效一律走变量而非硬编码，才能跟随主题
+ * 与应用的「字体大小」设置。层级约定：内容区 --bg-primary、工具条 --bg-secondary、
+ * 内嵌卡片 --bg-tertiary、浮层 --bg-overlay + --shadow-pop、输入面 --bg-sunken。
+ * 状态只用语义色变量，且不只靠颜色表达：StatusPill 的点形、Notice 的文案都是第二重编码。
  */
 import React from "react";
 
+/* ===== token 别名：视图从这里取变量串，避免字面量散落 ===== */
 export const textPrimary = "var(--text-primary)";
 export const textSecondary = "var(--text-secondary)";
 export const textMuted = "var(--text-muted)";
 export const border = "var(--border)";
+export const borderSubtle = "var(--border-subtle)";
 export const bgPrimary = "var(--bg-primary)";
 export const bgSecondary = "var(--bg-secondary)";
+export const bgTertiary = "var(--bg-tertiary)";
+export const bgSunken = "var(--bg-sunken)";
 export const hover = "var(--hover)";
 export const accent = "var(--accent)";
 export const accentFg = "var(--accent-fg)";
-export const danger = "#e5534b";
+export const accentSoft = "var(--accent-soft)";
+export const danger = "var(--danger)";
+export const success = "var(--success)";
+export const warning = "var(--warning)";
 
-export const FONT_SM = 12;
-export const FONT_MD = 13;
+/** 字阶（rem）：micro 11 / caption 12 / ui 13 / body 14，随应用字体大小设置缩放。 */
+export const FONT_MICRO = "var(--fs-micro)";
+export const FONT_CAPTION = "var(--fs-caption)";
+export const FONT_UI = "var(--fs-ui)";
+export const FONT_BODY = "var(--fs-body)";
 
-/** 滚动区类名与显式可见的滚动条样式：宿主主题可能隐藏滚动条，滚动区需要自带。 */
+/** 状态变化统一时长与曲线；无限循环动画（占位格流光/呼吸）不归入此档。 */
+export const TRANSITION_FAST = "var(--dur-fast) var(--ease)";
+export const TRANSITION_BASE = "var(--dur-base) var(--ease)";
+
+/** 浮层通用外观：宿主 PopupLayer 同款——overlay 底 + 细边 + pop 投影（投影只给浮起元素）。 */
+export const FLOAT_STYLE = {
+  background: "var(--bg-overlay)",
+  border: `1px solid ${border}`,
+  borderRadius: "var(--radius-md)",
+  boxShadow: "var(--shadow-pop)",
+};
+
+/** 滚动区类名与滚动条样式：宿主主题可能隐藏滚动条，滚动区需要自带；
+ *  thumb 走 --scrollbar-* 变量随主题取色。 */
 export const SCROLL_LIST_CLASS = "cf-scroll-list";
 export const SCROLLBAR_CSS = `
 .cf-scroll-list::-webkit-scrollbar { width: 10px; height: 10px; }
 .cf-scroll-list::-webkit-scrollbar-track { background: transparent; }
-.cf-scroll-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+.cf-scroll-list::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 5px; }
+.cf-scroll-list::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 `;
 
 /** 图标基座（lucide 的 24×24 线性风格）；不引图标库，图标即几条 path。 */
@@ -153,7 +180,7 @@ export function ZapIcon(props: { size?: number }): unknown {
   );
 }
 
-/** 面板外壳：铺满可用空间，自身负责滚动。 */
+/** 面板外壳：铺满可用空间，自身不滚动（滚动交内容子区）。 */
 export function Panel(props: { children: unknown; toolbar?: unknown }): unknown {
   return (
     <div
@@ -164,7 +191,7 @@ export function Panel(props: { children: unknown; toolbar?: unknown }): unknown 
         minHeight: 0,
         background: bgPrimary,
         color: textPrimary,
-        fontSize: FONT_MD,
+        fontSize: FONT_UI,
       }}
     >
       {props.toolbar}
@@ -173,16 +200,16 @@ export function Panel(props: { children: unknown; toolbar?: unknown }): unknown 
   );
 }
 
-/** 顶部工具条：状态在左，动作在右。 */
+/** 面板头工具条：状态在左，动作在右；secondary 底 + 1px 底边与内容区分层。 */
 export function Toolbar(props: { children: unknown }): unknown {
   return (
     <div
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 8,
+        gap: 6,
         flexWrap: "wrap",
-        padding: "8px 10px",
+        padding: "8px 12px",
         borderBottom: `1px solid ${border}`,
         background: bgSecondary,
         flexShrink: 0,
@@ -193,22 +220,48 @@ export function Toolbar(props: { children: unknown }): unknown {
   );
 }
 
-interface ButtonProps {
-  children: unknown;
+type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+type ButtonSize = "sm" | "md";
+
+/** 控件高固定（sm 24 / md 28），字号变化不撑开布局。 */
+const BUTTON_SIZE: Record<ButtonSize, { height: number; padding: string; font: string; gap: number }> = {
+  sm: { height: 24, padding: "0 8px", font: FONT_MICRO, gap: 4 },
+  md: { height: 28, padding: "0 12px", font: FONT_UI, gap: 6 },
+};
+
+/** 变体只给底色/文字色/hover 反馈；强调色留给需引起注意的动作。 */
+const BUTTON_VARIANT: Record<
+  ButtonVariant,
+  { background: string; color: string; hoverBackground?: string; hoverColor?: string }
+> = {
+  primary: { background: accent, color: accentFg, hoverBackground: "var(--accent-hover)" },
+  secondary: { background: bgTertiary, color: textPrimary, hoverBackground: hover },
+  ghost: { background: "transparent", color: textSecondary, hoverBackground: hover, hoverColor: textPrimary },
+  danger: {
+    background: "transparent",
+    color: danger,
+    hoverBackground: "color-mix(in srgb, var(--danger) 12%, transparent)",
+  },
+};
+
+export function Button(props: {
+  children?: unknown;
   onClick?: () => void;
   disabled?: boolean;
   title?: string;
-  primary?: boolean;
-  /** 危险动作（如中断、停止）。 */
-  tone?: "default" | "primary" | "danger";
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  /** 受控高亮（弹层触发钮展开时）：底色 --hover，优先于变体底色。 */
   active?: boolean;
-}
-
-export function Button(props: ButtonProps): unknown {
+  style?: Record<string, unknown>;
+}): unknown {
   const [isHover, setHover] = React.useState(false);
-  const tone = props.tone ?? (props.primary ? "primary" : "default");
-  const background = tone === "primary" ? accent : tone === "danger" ? danger : props.active ? hover : "transparent";
-  const color = tone === "primary" ? accentFg : tone === "danger" ? "#fff" : textPrimary;
+  const [isFocusVisible, setFocusVisible] = React.useState(false);
+  const size = BUTTON_SIZE[props.size ?? "md"];
+  const v = BUTTON_VARIANT[props.variant ?? "secondary"];
+  const enabled = !props.disabled;
+  const background = props.active ? hover : isHover && enabled ? (v.hoverBackground ?? v.background) : v.background;
+  const color = isHover && enabled ? (v.hoverColor ?? v.color) : v.color;
   return (
     <button
       type="button"
@@ -217,20 +270,32 @@ export function Button(props: ButtonProps): unknown {
       onClick={props.disabled ? undefined : props.onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onFocus={(e: { target: EventTarget | null }) =>
+        setFocusVisible(e.target instanceof HTMLElement && e.target.matches(":focus-visible"))
+      }
+      onBlur={() => setFocusVisible(false)}
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 6,
-        padding: "5px 10px",
-        borderRadius: 6,
-        fontSize: FONT_SM,
+        justifyContent: "center",
+        gap: size.gap,
+        height: size.height,
+        padding: size.padding,
+        borderRadius: "var(--radius-sm)",
+        fontSize: size.font,
+        fontWeight: 500,
         fontFamily: "inherit",
         cursor: props.disabled ? "not-allowed" : "pointer",
-        opacity: props.disabled ? 0.5 : 1,
-        border: `1px solid ${tone === "default" ? border : "transparent"}`,
-        background: props.disabled ? "transparent" : tone === "default" && isHover ? hover : background,
+        opacity: props.disabled ? 0.4 : 1,
+        border: "none",
+        background,
         color,
         whiteSpace: "nowrap",
+        flexShrink: 0,
+        outline: "none",
+        boxShadow: isFocusVisible && enabled ? "var(--focus-ring)" : undefined,
+        transition: `background ${TRANSITION_FAST}, color ${TRANSITION_FAST}`,
+        ...props.style,
       }}
     >
       {props.children}
@@ -238,32 +303,62 @@ export function Button(props: ButtonProps): unknown {
   );
 }
 
-export function StatusDot(props: { tone: "ok" | "warn" | "bad" | "idle"; label: string; title?: string }): unknown {
+/**
+ * 状态语义胶囊：色 + 点形 + 文字三重编码——ok/warn 圆点、bad/idle 方点，
+ * 文字与点同色（语义变量），不辨色也能读出状态。
+ */
+export function StatusPill(props: { tone: "ok" | "warn" | "bad" | "idle"; label: string; title?: string }): unknown {
   const color =
-    props.tone === "ok" ? "#3fb950" : props.tone === "warn" ? "#d29922" : props.tone === "bad" ? danger : textMuted;
+    props.tone === "ok" ? success : props.tone === "warn" ? warning : props.tone === "bad" ? danger : textMuted;
+  const round = props.tone === "ok" || props.tone === "warn";
   return (
-    <span title={props.title} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: FONT_SM }}>
-      <span style={{ width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 }} />
-      <span style={{ color: textSecondary }}>{props.label}</span>
+    <span
+      title={props.title}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: FONT_MICRO, flexShrink: 0 }}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: round ? 3 : 1, background: color, flexShrink: 0 }} />
+      <span style={{ color }}>{props.label}</span>
     </span>
   );
 }
 
-/** 进度条（0..1）。 */
+/** 进度条（0..1）：4px 细条，轨道下沉、填充走强调色。 */
 export function ProgressBar(props: { value: number; label?: string }): unknown {
   const pct = Math.max(0, Math.min(1, props.value));
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ height: 6, borderRadius: 3, background: hover, overflow: "hidden" }}>
-        <div style={{ width: `${pct * 100}%`, height: "100%", background: accent, transition: "width 120ms linear" }} />
+      <div style={{ height: 4, borderRadius: 2, background: "var(--bg-sunken)", overflow: "hidden" }}>
+        <div
+          style={{
+            width: `${pct * 100}%`,
+            height: "100%",
+            background: accent,
+            transition: `width ${TRANSITION_BASE}`,
+          }}
+        />
       </div>
-      {props.label ? <div style={{ fontSize: 11, color: textMuted }}>{props.label}</div> : null}
+      {props.label ? <div style={{ fontSize: FONT_MICRO, color: textMuted }}>{props.label}</div> : null}
     </div>
   );
 }
 
+const NOTICE_TONE: Record<"info" | "warn" | "error", { color: string; borderColor: string; background: string }> = {
+  info: { color: textSecondary, borderColor: border, background: bgTertiary },
+  warn: {
+    color: warning,
+    borderColor: "color-mix(in srgb, var(--warning) 32%, transparent)",
+    background: "color-mix(in srgb, var(--warning) 10%, transparent)",
+  },
+  error: {
+    color: danger,
+    borderColor: "color-mix(in srgb, var(--danger) 32%, transparent)",
+    background: "color-mix(in srgb, var(--danger) 10%, transparent)",
+  },
+};
+
+/** 提示条：语义色只上边与底（color-mix 低占比），文字承载具体原因。 */
 export function Notice(props: { tone: "info" | "warn" | "error"; children: unknown; onClose?: () => void }): unknown {
-  const color = props.tone === "error" ? danger : props.tone === "warn" ? "#d29922" : textSecondary;
+  const t = NOTICE_TONE[props.tone];
   return (
     <div
       style={{
@@ -271,11 +366,11 @@ export function Notice(props: { tone: "info" | "warn" | "error"; children: unkno
         alignItems: "flex-start",
         gap: 8,
         padding: "8px 10px",
-        borderRadius: 6,
-        border: `1px solid ${color}`,
-        background: bgSecondary,
-        fontSize: FONT_SM,
-        color: textSecondary,
+        borderRadius: "var(--radius-sm)",
+        border: `1px solid ${t.borderColor}`,
+        background: t.background,
+        fontSize: FONT_CAPTION,
+        color: t.color,
         lineHeight: 1.5,
       }}
     >
@@ -289,9 +384,10 @@ export function Notice(props: { tone: "info" | "warn" | "error"; children: unkno
             display: "inline-flex",
             border: "none",
             background: "transparent",
-            color: textMuted,
+            color: "inherit",
             cursor: "pointer",
             padding: 0,
+            flexShrink: 0,
           }}
         >
           <CloseIcon size={14} />
@@ -301,35 +397,27 @@ export function Notice(props: { tone: "info" | "warn" | "error"; children: unkno
   );
 }
 
-export function SectionTitle(props: { children: unknown; right?: unknown }): unknown {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 8,
-        padding: "6px 10px",
-        fontSize: 11,
-        letterSpacing: 0.4,
-        textTransform: "uppercase",
-        color: textMuted,
-        flexShrink: 0,
-      }}
-    >
-      <span>{props.children}</span>
-      {props.right}
-    </div>
-  );
-}
+const CHIP_TONE: Record<"default" | "ok" | "warn", { color: string; borderColor: string; background: string }> = {
+  default: { color: textSecondary, borderColor: border, background: bgTertiary },
+  ok: {
+    color: success,
+    borderColor: "color-mix(in srgb, var(--success) 32%, transparent)",
+    background: "color-mix(in srgb, var(--success) 12%, transparent)",
+  },
+  warn: {
+    color: warning,
+    borderColor: "color-mix(in srgb, var(--warning) 32%, transparent)",
+    background: "color-mix(in srgb, var(--warning) 12%, transparent)",
+  },
+};
 
-/** 低调小标签：展示状态或来源这类次要信息，不抢输入行的空间。 */
+/** 低调小徽标：展示状态或来源这类次要信息，不抢输入行的空间。 */
 export function Chip(props: {
   children: unknown;
   title?: string;
   tone?: "default" | "ok" | "warn";
 }): unknown {
-  const color = props.tone === "ok" ? "#3fb950" : props.tone === "warn" ? "#d29922" : textMuted;
+  const t = CHIP_TONE[props.tone ?? "default"];
   return (
     <span
       title={props.title}
@@ -338,16 +426,17 @@ export function Chip(props: {
         alignItems: "center",
         gap: 4,
         maxWidth: "100%",
-        padding: "1px 6px",
-        borderRadius: 4,
-        border: `1px solid ${border}`,
-        background: bgPrimary,
-        fontSize: 10,
-        lineHeight: 1.7,
-        color,
+        padding: "2px 6px",
+        borderRadius: "var(--radius-xs)",
+        border: `1px solid ${t.borderColor}`,
+        background: t.background,
+        fontSize: FONT_MICRO,
+        lineHeight: 1.2,
+        color: t.color,
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
+        flexShrink: 0,
       }}
     >
       {props.children}
@@ -355,7 +444,7 @@ export function Chip(props: {
   );
 }
 
-/** 可折叠区块：标题栏可点击展开/收起，children 仅在展开时渲染。 */
+/** 可折叠区块（内嵌卡片）：标题栏可点击展开/收起，children 仅在展开时渲染。 */
 export function CollapseCard(props: {
   title: unknown;
   subtitle?: unknown;
@@ -368,8 +457,8 @@ export function CollapseCard(props: {
     <div
       style={{
         border: `1px solid ${border}`,
-        borderRadius: 8,
-        background: bgSecondary,
+        borderRadius: "var(--radius-sm)",
+        background: bgTertiary,
         marginBottom: 8,
         overflow: "hidden",
       }}
@@ -384,11 +473,12 @@ export function CollapseCard(props: {
           gap: 6,
           width: "100%",
           boxSizing: "border-box",
-          padding: "7px 10px",
+          padding: "6px 8px",
           border: "none",
           background: "transparent",
           color: textPrimary,
-          fontSize: FONT_SM,
+          fontSize: FONT_CAPTION,
+          fontWeight: 500,
           textAlign: "left",
           cursor: "pointer",
         }}
@@ -413,7 +503,8 @@ export function CollapseCard(props: {
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
-              fontSize: 10,
+              fontSize: FONT_MICRO,
+              fontWeight: 400,
               color: textMuted,
             }}
           >
@@ -426,12 +517,12 @@ export function CollapseCard(props: {
           <span
             style={{
               flexShrink: 0,
-              fontSize: 10,
-              color: textMuted,
+              fontSize: FONT_MICRO,
+              color: textSecondary,
               border: `1px solid ${border}`,
-              borderRadius: 8,
-              padding: "0 6px",
-              lineHeight: "15px",
+              borderRadius: "var(--radius-xs)",
+              padding: "1px 6px",
+              lineHeight: 1.2,
             }}
           >
             {props.badge}
@@ -444,8 +535,8 @@ export function CollapseCard(props: {
             display: "flex",
             flexDirection: "column",
             gap: 6,
-            padding: "6px 10px 10px",
-            borderTop: `1px solid ${border}`,
+            padding: 8,
+            borderTop: `1px solid ${borderSubtle}`,
           }}
         >
           {props.children}
@@ -455,7 +546,8 @@ export function CollapseCard(props: {
   );
 }
 
-export function Empty(props: { children: unknown; hint?: unknown }): unknown {
+/** 空态：图标块 + 标题 + 说明 + 行动；说明承载「为什么空、下一步做什么」。 */
+export function Empty(props: { icon?: unknown; title: unknown; description?: unknown; action?: unknown }): unknown {
   return (
     <div
       style={{
@@ -465,18 +557,51 @@ export function Empty(props: { children: unknown; hint?: unknown }): unknown {
         alignItems: "center",
         justifyContent: "center",
         gap: 8,
-        padding: 24,
+        padding: "40px 24px",
         textAlign: "center",
-        color: textMuted,
-        fontSize: FONT_SM,
-        lineHeight: 1.6,
       }}
     >
-      <div>{props.children}</div>
-      {props.hint ? <div style={{ fontSize: 11 }}>{props.hint}</div> : null}
+      {props.icon ? (
+        <div
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: "var(--radius-md)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: bgTertiary,
+            color: textMuted,
+            flexShrink: 0,
+          }}
+        >
+          {props.icon}
+        </div>
+      ) : null}
+      <div style={{ fontSize: FONT_BODY, fontWeight: 500, color: textPrimary }}>{props.title}</div>
+      {props.description ? (
+        <div style={{ fontSize: FONT_UI, color: textMuted, lineHeight: 1.6, maxWidth: "42ch" }}>
+          {props.description}
+        </div>
+      ) : null}
+      {props.action ? <div style={{ marginTop: 4 }}>{props.action}</div> : null}
     </div>
   );
 }
+
+const FIELD_BASE: Record<string, unknown> = {
+  width: "100%",
+  boxSizing: "border-box",
+  padding: "4px 8px",
+  borderRadius: "var(--radius-sm)",
+  border: `1px solid var(--input-border)`,
+  background: "var(--input-bg)",
+  color: textPrimary,
+  fontSize: FONT_UI,
+  fontFamily: "inherit",
+  outline: "none",
+  transition: `border-color ${TRANSITION_FAST}`,
+};
 
 export function TextInput(props: {
   value: string;
@@ -493,6 +618,7 @@ export function TextInput(props: {
   const [focused, setFocused] = React.useState(false);
   return (
     <input
+      className="cf-field"
       type={props.type ?? "text"}
       value={props.value}
       placeholder={props.placeholder}
@@ -505,17 +631,11 @@ export function TextInput(props: {
       onBlur={() => setFocused(false)}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "5px 8px",
-        borderRadius: 6,
-        border: `1px solid ${focused ? accent : border}`,
-        boxShadow: focused ? `0 0 0 1px ${accent}` : undefined,
-        background: bgPrimary,
-        color: textPrimary,
-        fontSize: FONT_SM,
-        fontFamily: "inherit",
-        outline: "none",
+        ...FIELD_BASE,
+        borderColor: focused ? accent : "var(--input-border)",
+        boxShadow: focused ? "var(--focus-ring)" : undefined,
+        cursor: props.disabled ? "not-allowed" : undefined,
+        opacity: props.disabled ? 0.5 : 1,
         ...(props.style ?? {}),
       }}
     />
@@ -545,6 +665,7 @@ export function AutoTextArea(props: {
   React.useEffect(fit, [fit, props.value]);
   return (
     <textarea
+      className="cf-field"
       ref={ref}
       value={props.value}
       placeholder={props.placeholder}
@@ -552,18 +673,11 @@ export function AutoTextArea(props: {
       rows={1}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "6px 8px",
-        borderRadius: 6,
-        border: `1px solid ${border}`,
-        background: props.disabled ? "transparent" : bgPrimary,
-        color: textPrimary,
-        fontSize: FONT_SM,
-        fontFamily: "inherit",
+        ...FIELD_BASE,
+        border: "none",
+        background: "transparent",
         lineHeight: 1.5,
-        outline: "none",
-        opacity: props.disabled ? 0.6 : 1,
+        opacity: props.disabled ? 0.5 : 1,
         resize: "none",
         ...(props.style ?? {}),
       }}
@@ -582,25 +696,18 @@ export function TextArea(props: {
 }): unknown {
   return (
     <textarea
+      className="cf-field"
       value={props.value}
       placeholder={props.placeholder}
       rows={props.rows ?? 3}
       disabled={props.disabled}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "6px 8px",
-        borderRadius: 6,
-        border: `1px solid ${border}`,
-        background: props.disabled ? "transparent" : bgPrimary,
-        color: textPrimary,
-        fontSize: FONT_SM,
-        fontFamily: props.mono ? "ui-monospace, SFMono-Regular, Menlo, monospace" : "inherit",
+        ...FIELD_BASE,
+        fontFamily: props.mono ? "var(--font-mono)" : "inherit",
         lineHeight: 1.5,
         resize: "vertical",
-        outline: "none",
-        opacity: props.disabled ? 0.6 : 1,
+        opacity: props.disabled ? 0.5 : 1,
         ...(props.style ?? {}),
       }}
     />
@@ -617,21 +724,15 @@ export function Select(props: {
 }): unknown {
   return (
     <select
+      className="cf-field"
       value={props.value}
       disabled={props.disabled}
       title={props.title}
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "5px 6px",
-        borderRadius: 6,
-        border: `1px solid ${border}`,
-        background: bgPrimary,
-        color: textPrimary,
-        fontSize: FONT_SM,
-        fontFamily: "inherit",
-        outline: "none",
+        ...FIELD_BASE,
+        cursor: props.disabled ? "not-allowed" : "pointer",
+        opacity: props.disabled ? 0.5 : 1,
         ...(props.style ?? {}),
       }}
     >
@@ -657,11 +758,11 @@ export function Checkbox(props: {
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 6,
-        fontSize: FONT_SM,
-        color: textSecondary,
+        gap: 8,
+        fontSize: FONT_UI,
+        color: textPrimary,
         cursor: props.disabled ? "not-allowed" : "pointer",
-        opacity: props.disabled ? 0.6 : 1,
+        opacity: props.disabled ? 0.5 : 1,
       }}
     >
       <input
@@ -669,57 +770,33 @@ export function Checkbox(props: {
         checked={props.checked}
         disabled={props.disabled}
         onChange={(e: { target: { checked: boolean } }) => props.onChange(e.target.checked)}
-        style={{ accentColor: accent, cursor: "inherit" }}
+        style={{ accentColor: accent, width: 14, height: 14, cursor: "inherit", flexShrink: 0 }}
       />
       {props.label}
     </label>
   );
 }
 
-/** 破坏性动作的二次确认：就地展开，不用系统弹窗（应用内统一走界面反馈）。 */
-export function ConfirmButton(props: {
-  label: string;
-  confirmLabel: string;
-  onConfirm: () => void;
-  disabled?: boolean;
-}): unknown {
-  const [asking, setAsking] = React.useState(false);
-  if (!asking) {
-    return <Button disabled={props.disabled} onClick={() => setAsking(true)}>{props.label}</Button>;
-  }
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <Button
-        tone="danger"
-        onClick={() => {
-          setAsking(false);
-          props.onConfirm();
-        }}
-      >
-        {props.confirmLabel}
-      </Button>
-      <Button onClick={() => setAsking(false)}>取消</Button>
-    </span>
-  );
-}
-
 export function Field(props: { label: string; hint?: unknown; children: unknown }): unknown {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
-      <div style={{ fontSize: FONT_SM, color: textPrimary }}>{props.label}</div>
-      {props.hint ? <div style={{ fontSize: 11, color: textMuted, lineHeight: 1.5 }}>{props.hint}</div> : null}
+      <div style={{ fontSize: FONT_CAPTION, color: textPrimary }}>{props.label}</div>
+      {props.hint ? (
+        <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.5 }}>{props.hint}</div>
+      ) : null}
       {props.children}
     </div>
   );
 }
 
+/** 设置区块卡：内嵌卡片档（tertiary 底 + 细边），标题与右侧行动同排。 */
 export function Card(props: { title: string; children: unknown; actions?: unknown }): unknown {
   return (
     <div
       style={{
         border: `1px solid ${border}`,
-        borderRadius: 8,
-        background: bgSecondary,
+        borderRadius: "var(--radius-sm)",
+        background: bgTertiary,
         padding: 12,
         marginBottom: 12,
       }}
@@ -733,7 +810,7 @@ export function Card(props: { title: string; children: unknown; actions?: unknow
           marginBottom: 10,
         }}
       >
-        <div style={{ fontSize: FONT_MD, color: textPrimary, fontWeight: 600 }}>{props.title}</div>
+        <div style={{ fontSize: FONT_UI, color: textPrimary, fontWeight: 600 }}>{props.title}</div>
         {props.actions}
       </div>
       {props.children}
@@ -786,10 +863,7 @@ export function ContextMenu(props: {
         zIndex: 70,
         minWidth: 150,
         padding: "4px 0",
-        borderRadius: 8,
-        border: `1px solid ${border}`,
-        background: bgSecondary,
-        boxShadow: "0 10px 32px rgba(0,0,0,0.25)",
+        ...FLOAT_STYLE,
       }}
       // 菜单内再右键不落到遮罩上，避免菜单在原地反复重开
       onContextMenu={(e: { preventDefault(): void; stopPropagation(): void }) => {
@@ -802,7 +876,7 @@ export function ContextMenu(props: {
   );
 }
 
-/** 右键菜单项：图标 + 文案，悬停用强调色底。 */
+/** 右键菜单项：图标 + 文案，悬停出中性底。 */
 export function ContextMenuItem(props: { onClick: () => void; children: unknown }): unknown {
   const [isHover, setHover] = React.useState(false);
   return (
@@ -814,13 +888,13 @@ export function ContextMenuItem(props: { onClick: () => void; children: unknown 
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 8,
+        gap: 6,
         width: "100%",
-        padding: "6px 12px",
+        padding: "5px 12px",
         border: "none",
-        background: isHover ? accent : "transparent",
-        color: isHover ? accentFg : textPrimary,
-        fontSize: FONT_SM,
+        background: isHover ? hover : "transparent",
+        color: isHover ? textPrimary : textSecondary,
+        fontSize: FONT_CAPTION,
         fontFamily: "inherit",
         textAlign: "left",
         cursor: "pointer",

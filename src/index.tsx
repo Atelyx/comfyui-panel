@@ -18,7 +18,7 @@ import { resetGenerateSession } from "./views/generateSession";
 import { OrchestratePanel } from "./views/OrchestratePanel";
 import { disposeOrchestrateFrame } from "./views/orchestrateFrame";
 import { SettingsView } from "./views/Settings";
-import { bgSecondary, border, FONT_SM, textMuted } from "./views/ui";
+import { bgSecondary, border, FONT_CAPTION, textMuted } from "./views/ui";
 
 /** 与清单里的 name 一致。 */
 const PLUGIN_ID = "com.atelyx.comfyui-panel";
@@ -125,7 +125,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
 
   function InitPlaceholder(): unknown {
     return (
-      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, fontSize: FONT_SM }}>
+      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, fontSize: FONT_CAPTION }}>
         正在初始化…
       </div>
     );
@@ -154,7 +154,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
   function ComfySettings(): unknown {
     const ready = React.useSyncExternalStore(subscribe, getDeps);
     if (!ready) {
-      return <div style={{ padding: 16, color: textMuted, fontSize: FONT_SM }}>正在初始化…</div>;
+      return <div style={{ padding: 16, color: textMuted, fontSize: FONT_CAPTION }}>正在初始化…</div>;
     }
     return (
       <SettingsView

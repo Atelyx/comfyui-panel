@@ -17,14 +17,18 @@ import {
   ContextMenuItem,
   CopyIcon,
   DownloadIcon,
+  FLOAT_STYLE,
+  FONT_CAPTION,
+  FONT_MICRO,
   SCROLL_LIST_CLASS,
   accent,
   bgPrimary,
-  bgSecondary,
+  bgTertiary,
   border,
+  borderSubtle,
   danger,
   Empty,
-  FONT_SM,
+  success,
   ImageIcon,
   SquareIcon,
   textMuted,
@@ -165,17 +169,15 @@ export function RecordFlow(props: RecordFlowProps): unknown {
       >
         {props.offline ? (
           <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-            <Empty hint="连接后展示生成结果">
-              <ImageIcon size={22} />
-              未连接
-            </Empty>
+            <Empty icon={<ImageIcon size={18} />} title="未连接" description="连接后展示生成结果" />
           </div>
         ) : records.length === 0 && runningCount === 0 ? (
           <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-            <Empty hint="输入提示词并生成，结果会按每次生成分组展示">
-              <ImageIcon size={22} />
-              还没有结果
-            </Empty>
+            <Empty
+              icon={<ImageIcon size={18} />}
+              title="还没有结果"
+              description="输入提示词并生成，结果会按每次生成分组展示"
+            />
           </div>
         ) : (
           <>
@@ -279,12 +281,12 @@ function RunningRecord(props: {
       action={
         <>
           {queued > 0 ? (
-            <span style={{ fontSize: 10, color: textMuted, flexShrink: 0 }}>
+            <span style={{ fontSize: FONT_MICRO, color: textMuted, flexShrink: 0 }}>
               {`运行 ${props.running.length} · 等待 ${props.pending.length}`}
             </span>
           ) : null}
           {promptText ? <CopyPromptButton text={promptText} onCopy={props.onCopyPrompt} /> : null}
-          <Button tone="danger" onClick={props.onInterrupt} title="中断当前执行">
+          <Button size="sm" variant="danger" onClick={props.onInterrupt} title="中断当前执行">
             <SquareIcon size={12} />
             中断
           </Button>
@@ -340,8 +342,8 @@ function RecordCard(props: {
       style={{
         marginBottom: 10,
         border: `1px solid ${border}`,
-        borderRadius: 8,
-        background: bgSecondary,
+        borderRadius: "var(--radius-sm)",
+        background: bgTertiary,
         overflow: "hidden",
       }}
     >
@@ -351,15 +353,14 @@ function RecordCard(props: {
           alignItems: "center",
           gap: 8,
           padding: "6px 10px",
-          borderBottom: `1px solid ${border}`,
-          background: bgPrimary,
+          borderBottom: `1px solid ${borderSubtle}`,
         }}
       >
         <span
           style={{
             flex: 1,
             minWidth: 0,
-            fontSize: FONT_SM,
+            fontSize: FONT_CAPTION,
             color: textPrimary,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -370,12 +371,12 @@ function RecordCard(props: {
           {props.title}
         </span>
         {props.failed ? (
-          <span style={{ fontSize: 10, color: danger, flexShrink: 0 }} title="任务执行出错，图中可能缺失">
+          <span style={{ fontSize: FONT_MICRO, color: danger, flexShrink: 0 }} title="任务执行出错，图中可能缺失">
             出错
           </span>
         ) : null}
         {props.time !== undefined ? (
-          <span style={{ fontSize: 10, color: textMuted, flexShrink: 0 }}>{formatTime(props.time)}</span>
+          <span style={{ fontSize: FONT_MICRO, color: textMuted, flexShrink: 0 }}>{formatTime(props.time)}</span>
         ) : null}
         {props.action}
       </div>
@@ -461,7 +462,7 @@ function RecordImage(props: {
       onMouseLeave={() => setHover(false)}
       style={{
         position: "relative",
-        borderRadius: 6,
+        borderRadius: "var(--radius-sm)",
         overflow: "hidden",
         aspectRatio: aspect,
         maxHeight: 320,
@@ -480,7 +481,7 @@ function RecordImage(props: {
             justifyContent: "center",
             gap: 4,
             color: textMuted,
-            fontSize: 10,
+            fontSize: FONT_MICRO,
           }}
         >
           <ImageIcon size={16} />
@@ -515,10 +516,10 @@ function RecordImage(props: {
             position: "absolute",
             top: 4,
             right: 4,
-            fontSize: 10,
+            fontSize: FONT_MICRO,
             lineHeight: 1.6,
             padding: "0 5px",
-            borderRadius: 4,
+            borderRadius: "var(--radius-xs)",
             background: "rgba(0,0,0,0.6)",
             color: "#fff",
           }}
@@ -542,7 +543,7 @@ function RecordImage(props: {
             style={{
               flex: 1,
               minWidth: 0,
-              fontSize: 10,
+              fontSize: FONT_MICRO,
               color: "#fff",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -559,10 +560,10 @@ function RecordImage(props: {
             onClick={props.onArchive}
             style={{
               border: "none",
-              borderRadius: 4,
+              borderRadius: "var(--radius-xs)",
               background: "rgba(255,255,255,0.9)",
               color: "#111",
-              fontSize: 10,
+              fontSize: FONT_MICRO,
               padding: "2px 6px",
               cursor: props.saving || props.saveDisabled ? "not-allowed" : "pointer",
             }}
@@ -649,14 +650,14 @@ function PreviewOverlay(props: {
       {broken ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: "#fff" }}>
           <ImageIcon size={28} />
-          <span style={{ fontSize: FONT_SM }}>图片已不在：预览输出会随服务重启删除，且本图未留下副本</span>
+          <span style={{ fontSize: FONT_CAPTION }}>图片已不在：预览输出会随服务重启删除，且本图未留下副本</span>
         </div>
       ) : (
         <img
           src={src}
           alt={props.item.ref.filename}
           onError={onError}
-          style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 6 }}
+          style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: "var(--radius-sm)" }}
         />
       )}
       {menu ? (
@@ -683,10 +684,9 @@ function PreviewOverlay(props: {
             left: "50%",
             transform: "translateX(-50%)",
             padding: "6px 12px",
-            borderRadius: 6,
-            fontSize: FONT_SM,
-            background: "rgba(0,0,0,0.75)",
-            color: notice.kind === "success" ? "#4ade80" : "#f87171",
+            fontSize: FONT_CAPTION,
+            color: notice.kind === "success" ? success : danger,
+            ...FLOAT_STYLE,
           }}
         >
           {notice.text}
@@ -754,7 +754,7 @@ function GenerationGrid(props: {
           width: size.width,
           height: size.height,
           maxWidth: "100%",
-          borderRadius: 10,
+          borderRadius: "var(--radius-md)",
           overflow: "hidden",
           boxSizing: "border-box",
           border: state === "active" || state === "done" ? `1px solid ${accent}` : `1px solid ${border}`,
@@ -763,7 +763,7 @@ function GenerationGrid(props: {
               ? "color-mix(in srgb, var(--accent) 16%, transparent)"
               : state === "active"
                 ? "color-mix(in srgb, var(--accent) 6%, transparent)"
-                : bgSecondary,
+                : bgPrimary,
         }}
       >
         {state === "queued" ? (
@@ -802,7 +802,7 @@ function GenerationGrid(props: {
                 position: "absolute",
                 inset: 0,
                 background:
-                  "linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.09) 50%, transparent 70%)",
+                  "linear-gradient(115deg, transparent 30%, color-mix(in srgb, var(--text-primary) 8%, transparent) 50%, transparent 70%)",
                 backgroundSize: "200% 100%",
                 animation: "gen-shimmer 2.4s linear infinite",
               }}
@@ -836,7 +836,7 @@ function GenerationGrid(props: {
               {props.node ? (
                 <span
                   style={{
-                    fontSize: 9,
+                    fontSize: FONT_MICRO,
                     color: textMuted,
                     maxWidth: "92%",
                     overflow: "hidden",
@@ -859,7 +859,7 @@ function GenerationGrid(props: {
               alignItems: "center",
               justifyContent: "center",
               color: textMuted,
-              fontSize: 9,
+              fontSize: FONT_MICRO,
             }}
           >
             待生成
@@ -875,7 +875,7 @@ function GenerationGrid(props: {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
         {Array.from({ length: shown }, (_, index) => renderCell(index))}
         {props.batch > MAX_CELLS ? (
-          <span style={{ alignSelf: "center", fontSize: 11, color: textMuted }}>
+          <span style={{ alignSelf: "center", fontSize: FONT_MICRO, color: textMuted }}>
             …共 {props.batch} 张
           </span>
         ) : null}

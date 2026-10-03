@@ -19,7 +19,7 @@ import {
   reloadOrchestrateFrame,
   subscribeOrchestrateFrame,
 } from "./orchestrateFrame";
-import { Button, Empty, Panel, Toolbar, StatusDot, border, textMuted } from "./ui";
+import { Button, Empty, Panel, Toolbar, StatusPill, border, FONT_MICRO, textMuted } from "./ui";
 
 interface OrchestrateProps {
   runtime: ComfyRuntime;
@@ -47,12 +47,12 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
     <Panel
       toolbar={
         <Toolbar>
-          <StatusDot
+          <StatusPill
             tone={offline ? "bad" : loaded ? "ok" : "idle"}
             label={offline ? "未连接" : loaded ? "已加载" : "加载中…"}
           />
           <span style={{ flex: 1 }} />
-          <Button onClick={() => reloadOrchestrateFrame()} disabled={offline}>
+          <Button size="sm" variant="ghost" onClick={() => reloadOrchestrateFrame()} disabled={offline}>
             刷新
           </Button>
         </Toolbar>
@@ -60,21 +60,21 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
     >
       {offline ? (
         <Empty
-          hint={
+          icon={null}
+          title="未连接到 ComfyUI"
+          description={
             hostSnapshot.running
               ? "服务已启动，正在等待就绪…"
               : "启动服务后即可编排；也可在设置里改为自行管理"
           }
-        >
-          <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-            <span>未连接到 ComfyUI</span>
-            {hostSnapshot.running || snapshot.probing ? null : (
-              <Button tone="primary" onClick={() => void host.start(runtime)} disabled={hostSnapshot.starting}>
+          action={
+            hostSnapshot.running || snapshot.probing ? null : (
+              <Button variant="primary" onClick={() => void host.start(runtime)} disabled={hostSnapshot.starting}>
                 {hostSnapshot.starting ? "启动中…" : "启动 ComfyUI"}
               </Button>
-            )}
-          </span>
-        </Empty>
+            )
+          }
+        />
       ) : (
         <>
           {/* 空锚点：常驻 iframe 以固定定位覆盖这块区域 */}
@@ -83,7 +83,7 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
             style={{
               padding: "4px 10px",
               borderTop: `1px solid ${border}`,
-              fontSize: 11,
+              fontSize: FONT_MICRO,
               color: textMuted,
               flexShrink: 0,
             }}

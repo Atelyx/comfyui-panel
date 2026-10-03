@@ -9,7 +9,7 @@ import React from "react";
 import type { ApiPrompt, ObjectInfoMap } from "../comfy/types";
 import type { ComfyRuntime } from "../runtime";
 import { readField, type FieldSpec } from "../workflow/form";
-import { border, Button, Select, UploadIcon, textMuted, bgSecondary } from "./ui";
+import { border, Button, FONT_MICRO, FLOAT_STYLE, Select, TRANSITION_FAST, UploadIcon, textMuted } from "./ui";
 
 interface RefImageStackProps {
   fields: FieldSpec[];
@@ -56,7 +56,7 @@ export function RefImageStack(props: RefImageStackProps): unknown {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
-      <span style={{ fontSize: 10, color: textMuted }}>参考图</span>
+      <span style={{ fontSize: FONT_MICRO, color: textMuted }}>参考图</span>
       <div style={{ display: "flex", alignItems: "center" }}>
         {visible.map((slot, index) => {
           const filename = props.draft ? String(readField(props.draft, slot) ?? "") : "";
@@ -85,10 +85,10 @@ export function RefImageStack(props: RefImageStackProps): unknown {
               height: 64,
               marginLeft: -8,
               border: `1px dashed ${border}`,
-              borderRadius: 6,
+              borderRadius: "var(--radius-sm)",
               background: "var(--hover)",
               color: textMuted,
-              fontSize: 10,
+              fontSize: FONT_MICRO,
               cursor: "pointer",
             }}
           >
@@ -146,7 +146,7 @@ function RefSlot(props: {
         style={{
           width: 48,
           height: 64,
-          borderRadius: 6,
+          borderRadius: "var(--radius-sm)",
           border: `1px dashed ${props.thumbUrl ? "transparent" : border}`,
           background: props.thumbUrl ? "transparent" : "var(--hover)",
           overflow: "hidden",
@@ -155,7 +155,7 @@ function RefSlot(props: {
           transform: hover
             ? "translateY(-6px) scale(1.1) rotate(0deg)"
             : `rotate(${props.field.nodeId.charCodeAt(0) % 2 === 0 ? -2.5 : 2.5}deg)`,
-          transition: "transform 0.15s ease",
+          transition: `transform ${TRANSITION_FAST}`,
           zIndex: hover ? 2 : 1,
         }}
       >
@@ -196,10 +196,7 @@ function RefSlot(props: {
             display: "flex",
             flexDirection: "column",
             gap: 4,
-            borderRadius: 6,
-            border: `1px solid ${border}`,
-            background: bgSecondary,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+            ...FLOAT_STYLE,
           }}
         >
           {props.options.length > 0 ? (
@@ -209,13 +206,13 @@ function RefSlot(props: {
               options={[{ value: "", label: "从已有图选择…" }, ...props.options.map((option) => ({ value: option, label: option }))]}
             />
           ) : (
-            <span style={{ fontSize: 10, color: textMuted }}>节点定义加载后可选择已有图</span>
+            <span style={{ fontSize: FONT_MICRO, color: textMuted }}>节点定义加载后可选择已有图</span>
           )}
           <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
-            <Button disabled={props.disabled || uploading} onClick={pickFile}>
+            <Button size="sm" disabled={props.disabled || uploading} onClick={pickFile}>
               {uploading ? "上传中…" : props.filename ? "替换" : "上传"}
             </Button>
-            {props.filename ? <Button onClick={() => props.onChange("")}>清空</Button> : null}
+            {props.filename ? <Button size="sm" onClick={() => props.onChange("")}>清空</Button> : null}
           </span>
         </div>
       ) : null}
