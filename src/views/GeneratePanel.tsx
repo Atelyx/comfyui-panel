@@ -518,7 +518,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
   const doArchive = React.useCallback(
     async (item: ResultImage) => {
       if (runtime.getSnapshot().vaultKind === "space") {
-        setActionError("协作空间仓库暂不支持保存图片：请切换到个人仓库后再保存");
+        setActionError("协作空间仓库不支持保存图片，请切换到个人仓库");
         return;
       }
       setSavingKey(item.key);
@@ -569,14 +569,14 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
             disabled={workflows.length === 0 || offline}
             options={
               workflows.length === 0
-                ? [{ value: "", label: "尚无工作流" }]
+                ? [{ value: "", label: offline ? "请先启动服务" : "尚无工作流" }]
                 : workflows.map((item) => ({ value: item.path, label: workflowDisplayName(item.path) }))
             }
-            style={{ maxWidth: 240, flex: 1, height: 24 }}
+            style={{ maxWidth: 240, flex: 1 }}
           />
           <span style={{ flex: 1 }} />
           <RemoteEntry remote={remote} />
-          <Button size="sm" onClick={() => void runtime.freeMemory()} disabled={offline} title="释放模型/显存，不影响队列">
+          <Button size="sm" onClick={() => void runtime.freeMemory()} disabled={offline} title="释放模型与显存">
             <ZapIcon size={12} />
             释放显存
           </Button>
@@ -618,7 +618,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       {fileUpdated ? (
         <div style={{ padding: "8px 12px 0" }}>
           <Notice tone="warn" onClose={() => setFileUpdated(false)}>
-            工作流文件已在编排界面更新；你正在调参的改动会被保留
+            工作流已在编排界面更新；你调的参数已保留
             <span style={{ display: "inline-flex", marginLeft: 8 }}>
               <Button size="sm" onClick={reloadActive}>重新载入</Button>
             </span>
@@ -636,19 +636,19 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
       {!draft ? (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {offline ? (
-            <Empty icon={<UploadIcon size={18} />} title="未连接" description="连接后自动发现 ComfyUI 目录里的工作流" />
+            <Empty icon={<UploadIcon size={18} />} title="未连接" description="连接后自动发现工作流" />
           ) : snapshot.workflowsError ? (
-            <Empty icon={<UploadIcon size={18} />} title={snapshot.workflowsError} description="工作流列表来自 ComfyUI 目录接口" />
+            <Empty icon={<UploadIcon size={18} />} title={snapshot.workflowsError} description="请重新连接重试" />
           ) : workflows.length === 0 ? (
             <Empty
               icon={<UploadIcon size={18} />}
               title="还没有工作流"
-              description="在编排界面保存的工作流会自动出现在这里"
+              description="在编排界面保存后会出现在这里"
             />
           ) : loadError ? (
             <Empty icon={<UploadIcon size={18} />} title="无法在生成面板使用" description="该工作流请在编排界面打开" />
           ) : (
-            <Empty icon={<UploadIcon size={18} />} title="读取失败" description="文件读取失败，请刷新连接重试" />
+            <Empty icon={<UploadIcon size={18} />} title="读取失败" description="请刷新连接重试" />
           )}
         </div>
       ) : (
@@ -709,7 +709,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 placeholder={
                   promptField
                     ? "描述你想生成的内容…"
-                    : "该工作流没有提示词字段，请到高级参数或编排界面调整"
+                    : "该工作流没有提示词字段，可在高级参数调整"
                 }
                 disabled={!promptField}
                 minHeight={44}
@@ -774,7 +774,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                   {Object.keys(draft).length} 节点 · {fields.length} 项参数
                 </span>
                 <span style={{ flex: 1 }} />
-                <Button size="sm" variant="ghost" onClick={copyJson} disabled={!active} title="复制这份工作流的 API JSON">
+                <Button size="sm" variant="ghost" onClick={copyJson} disabled={!active} title="复制工作流 API JSON">
                   <CopyIcon size={12} />
                   复制 JSON
                 </Button>
@@ -791,7 +791,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                   variant="ghost"
                   onClick={reloadActive}
                   disabled={!activeId || offline}
-                  title="放弃本地参数改动，读回工作流文件里的参数"
+                  title="放弃本地改动，重读工作流文件"
                 >
                   重新加载
                 </Button>
@@ -821,13 +821,13 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                             label: `${f.nodeLabel} · ${fieldLabel(f)}`,
                           })),
                         ]}
-                        title="底部大输入框绑定的提示词字段；有多个提示词节点时手动指定"
+                        title="底部输入框绑定的提示词字段"
                       />
                     </div>
                   ) : null}
                   {countDisabledNodes(draft) > 0 ? (
                     <div style={{ marginBottom: 8 }}>
-                      <Notice tone="warn">存在被禁用/跳过的节点，结果异常请回 ComfyUI 确认</Notice>
+                      <Notice tone="warn">存在禁用/跳过的节点，结果异常请回 ComfyUI 确认</Notice>
                     </div>
                   ) : null}
                   <div style={{ position: "relative", marginBottom: 8 }}>
@@ -1031,7 +1031,7 @@ function SizePicker(props: {
           fontSize: FONT_MICRO,
           fontWeight: 500,
           fontFamily: "inherit",
-          cursor: props.disabled ? "not-allowed" : "pointer",
+          cursor: props.disabled ? "default" : "pointer",
           opacity: props.disabled ? 0.5 : 1,
           whiteSpace: "nowrap",
         }}

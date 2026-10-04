@@ -43,7 +43,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
 
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
-      <Button size="sm" onClick={() => setOpen((current) => !current)} active={open} title="经协作通道启停同一协作空间内其他机器上的 ComfyUI">
+      <Button size="sm" onClick={() => setOpen((current) => !current)} active={open} title="启停协作空间内其他机器的 ComfyUI">
         远程
         {remoteCount > 0 ? ` ${remoteCount}` : ""}
       </Button>
@@ -77,7 +77,7 @@ export function RemoteEntry(props: { remote: RemoteControl }): unknown {
 
           {snapshot.machines.length === 0 && !snapshot.error ? (
             <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.6 }}>
-              同一协作空间内没有其他成员。远程启停要求两台机器都启用协作、进入同一个协作空间，且对端装了本插件。
+              同一协作空间内没有其他成员（对端需启用本插件并加入同一协作空间）
             </div>
           ) : snapshot.machines.length === 0 ? null : (
             snapshot.machines.map((machine) => <MachineRow key={machine.peerId} machine={machine} remote={remote} />)
@@ -164,10 +164,10 @@ function phaseTone(machine: RemoteMachine): "ok" | "warn" | "bad" | "idle" {
 
 /** 对方的状态一行说清：设备名 + 标识 + 为什么不能启动。 */
 function describeMachine(machine: RemoteMachine): string {
-  if (!machine.replied) return `${machine.deviceName || "未知设备"}：未响应，需在对端启用本插件与协作`;
+  if (!machine.replied) return `${machine.deviceName || "未知设备"}：未响应，对端需启用本插件`;
   const parts = [machine.deviceName || "未知设备"];
   if (machine.tag) parts.push(`标识 ${machine.tag}`);
-  if (machine.phase === "ready") parts.push("连接地址用它的局域网地址与本端口");
+  if (machine.phase === "ready") parts.push("用它的局域网地址连接");
   else if (machine.phase === "external") parts.push("进程由对端自行启动，无法远程停止");
   // 已在运行或正在启动时，开关状态与能不能启动无关，说了只会跟状态标签打架
   else if (machine.denyReason) parts.push(`不可远程启动：${machine.denyReason}`);
@@ -178,12 +178,12 @@ function startHint(machine: RemoteMachine): string {
   if (!machine.replied) return "对端未响应，无法发送命令";
   if (machine.denyReason) return machine.denyReason;
   if (machine.phase !== "offline") return "对端已在运行或正在启动";
-  return "在对端托管启动 ComfyUI，并开放局域网监听";
+  return "在对端启动 ComfyUI";
 }
 
 function stopHint(machine: RemoteMachine): string {
   if (!machine.replied) return "对端未响应，无法发送命令";
   if (machine.phase === "external") return "对端进程不是插件托管的，无法远程停止";
-  if (machine.phase !== "ready") return "对端当前没有在运行的托管进程";
-  return "停止对端由插件托管的 ComfyUI 进程";
+  if (machine.phase !== "ready") return "对端没有可停止的进程";
+  return "停止对端的 ComfyUI";
 }

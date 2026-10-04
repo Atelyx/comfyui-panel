@@ -176,7 +176,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
             <Empty
               icon={<ImageIcon size={18} />}
               title="还没有结果"
-              description="输入提示词并生成，结果会按每次生成分组展示"
+              description="输入提示词并生成，结果在这里展示"
             />
           </div>
         ) : (
@@ -555,7 +555,7 @@ function RecordImage(props: {
           </span>
           <button
             type="button"
-            title={props.saveDisabled ? "协作空间仓库暂不支持保存图片" : "保存到仓库"}
+            title={props.saveDisabled ? "协作空间仓库不支持保存图片" : "保存到仓库"}
             disabled={props.saving || props.saveDisabled}
             onClick={props.onArchive}
             style={{
@@ -565,7 +565,7 @@ function RecordImage(props: {
               color: "#111",
               fontSize: FONT_MICRO,
               padding: "2px 6px",
-              cursor: props.saving || props.saveDisabled ? "not-allowed" : "pointer",
+              cursor: props.saving || props.saveDisabled ? "default" : "pointer",
             }}
           >
             {props.saving ? "保存中" : "保存"}
@@ -650,7 +650,7 @@ function PreviewOverlay(props: {
       {broken ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: "#fff" }}>
           <ImageIcon size={28} />
-          <span style={{ fontSize: FONT_CAPTION }}>图片已不在：预览输出会随服务重启删除，且本图未留下副本</span>
+          <span style={{ fontSize: FONT_CAPTION }}>图片已不在：输出随服务重启删除，且未留副本</span>
         </div>
       ) : (
         <img

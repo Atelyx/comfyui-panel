@@ -79,7 +79,7 @@ export function RefImageStack(props: RefImageStackProps): unknown {
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            title={`展开其余 ${extra} 个参考图`}
+            title={`展开其余 ${extra} 个`}
             style={{
               width: 30,
               height: 64,
@@ -142,7 +142,7 @@ function RefSlot(props: {
         onMouseEnter={() => setHover(true)}
         onMouseLeave={leaveThumb}
         onClick={props.disabled ? undefined : pickFile}
-        title={props.disabled ? "未连接，无法上传" : props.filename ? "点击替换参考图" : "点击上传参考图"}
+        title={props.disabled ? "未连接，无法上传" : props.filename ? "替换参考图" : "上传参考图"}
         style={{
           width: 48,
           height: 64,
@@ -151,7 +151,7 @@ function RefSlot(props: {
           background: props.thumbUrl ? "transparent" : "var(--hover)",
           overflow: "hidden",
           position: "relative",
-          cursor: props.disabled ? "not-allowed" : "pointer",
+          cursor: props.disabled ? "default" : "pointer",
           transform: hover
             ? "translateY(-6px) scale(1.1) rotate(0deg)"
             : `rotate(${props.field.nodeId.charCodeAt(0) % 2 === 0 ? -2.5 : 2.5}deg)`,

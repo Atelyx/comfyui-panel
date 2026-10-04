@@ -65,7 +65,7 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
           description={
             hostSnapshot.running
               ? "服务已启动，正在等待就绪…"
-              : "启动服务后即可编排；也可在设置里改为自行管理"
+              : "启动服务后即可编排"
           }
           action={
             hostSnapshot.running || snapshot.probing ? null : (
@@ -88,7 +88,7 @@ export function OrchestratePanel(props: OrchestrateProps): unknown {
               flexShrink: 0,
             }}
           >
-            界面由 ComfyUI 提供；在此保存的工作流（工作流 → 保存）会自动出现在生成面板的列表里
+            在此保存的工作流会自动出现在生成面板
           </div>
         </>
       )}

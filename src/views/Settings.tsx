@@ -77,7 +77,7 @@ export function SettingsView(props: SettingsProps): unknown {
           </Button>
         }
       >
-        <Field label="地址" hint="本机用 127.0.0.1">
+        <Field label="地址">
           <TextInput value={settings.host} onChange={(value) => patch({ host: value })} placeholder="127.0.0.1" />
         </Field>
         <Field label="端口" hint="托管启动时按此端口传参">
@@ -97,7 +97,7 @@ export function SettingsView(props: SettingsProps): unknown {
       </Card>
 
       <Card title="进程">
-        <Field label="接管方式" hint="托管：插件启停进程；外部：只检测连接">
+        <Field label="接管方式">
           <Select
             value={settings.processMode}
             onChange={(value) => patch({ processMode: value as ProcessMode })}
@@ -107,13 +107,13 @@ export function SettingsView(props: SettingsProps): unknown {
             ]}
           />
         </Field>
-        <Field label="ComfyUI 目录" hint="托管启动的工作目录。">
+        <Field label="ComfyUI 目录">
           <div style={{ display: "flex", gap: 6 }}>
             <TextInput value={settings.comfyDir} onChange={(value) => patch({ comfyDir: value })} placeholder="选择 ComfyUI 安装目录" />
             <Button onClick={() => void pickDirectory()}>选择</Button>
           </div>
         </Field>
-        <Field label="Python 可执行文件" hint="留空用 venv 内 python">
+        <Field label="Python 可执行文件">
           <div style={{ display: "flex", gap: 6 }}>
             <TextInput value={settings.pythonPath} onChange={(value) => patch({ pythonPath: value })} placeholder="留空使用 venv 内的 python" />
             <Button onClick={() => void pickPython()}>选择</Button>
@@ -129,12 +129,12 @@ export function SettingsView(props: SettingsProps): unknown {
         <Field label="附加启动参数" hint="追加在启动命令末尾；端口与跨域由插件注入">
           <TextInput value={settings.extraArgs} onChange={(value) => patch({ extraArgs: value })} placeholder="例如 --lowvram" />
         </Field>
-        <Field label="跨域放行" hint="插件与 ComfyUI 通信的前提；关闭后将无法连接">
+        <Field label="跨域放行" hint="关闭后无法连接">
           <Checkbox checked={settings.autoCors} onChange={(checked) => patch({ autoCors: checked })} label="启动时自动开启跨域放行" />
         </Field>
         <Field
           label="随应用启动"
-          hint="打开 Atelyx 时自动托管启动 ComfyUI 并等待就绪（加载模型可能较久）；服务已在运行时不会重复启动。仅托管模式生效。"
+          hint="打开 Atelyx 时自动启动 ComfyUI（仅托管模式）"
         >
           <Checkbox
             checked={settings.autoStart}
@@ -168,17 +168,17 @@ export function SettingsView(props: SettingsProps): unknown {
       <Card title="远程启停">
         <Field
           label="允许远程启动"
-          hint="开启后，同一协作空间内的其他成员可以启动/停止本机 ComfyUI；托管启动 ComfyUI（含本机自行启动）都会注入 --listen 0.0.0.0，本机服务将暴露给局域网。"
+          hint="同协作空间成员可远程启停本机；开启后本机服务暴露给局域网"
         >
           <Checkbox
             checked={settings.remoteEnabled}
             onChange={(checked) => patch({ remoteEnabled: checked })}
-            label="受理同一协作空间内成员的远程启动"
+            label="允许同协作空间成员远程启动"
           />
         </Field>
         <Field
           label="本机标识"
-          hint="命令的目标匹配与回执展示；留空用宿主设备名。它不是口令——能否发命令由上面的开关决定。"
+          hint="远程命令按标识匹配本机；留空用设备名"
         >
           <TextInput
             value={settings.remoteTag}
@@ -187,9 +187,7 @@ export function SettingsView(props: SettingsProps): unknown {
           />
         </Field>
         <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.6 }}>
-          停止不受上面的开关限制：远程拉起的进程仍可被远程收掉，否则对端会留下一个它自己收不回的进程。
-          <br />
-          在生成面板工具栏的「远程」里启停其他机器；本机要连哪台机器，在「连接」里自行填对方的局域网地址与端口。
+          远程拉起的进程始终可被远程停止；启停其他机器用生成面板的「远程」
         </div>
       </Card>
 
@@ -202,7 +200,7 @@ export function SettingsView(props: SettingsProps): unknown {
           />
         </Field>
         <div style={{ fontSize: FONT_MICRO, color: textMuted, lineHeight: 1.6 }}>
-          协作空间仓库暂不支持保存，生成结果只能在个人仓库落库。
+          仅个人仓库可保存生成结果
         </div>
       </Card>
 

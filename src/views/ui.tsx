@@ -285,7 +285,7 @@ export function Button(props: {
         fontSize: size.font,
         fontWeight: 500,
         fontFamily: "inherit",
-        cursor: props.disabled ? "not-allowed" : "pointer",
+        cursor: props.disabled ? "default" : "pointer",
         opacity: props.disabled ? 0.4 : 1,
         border: "none",
         background,
@@ -634,7 +634,7 @@ export function TextInput(props: {
         ...FIELD_BASE,
         borderColor: focused ? accent : "var(--input-border)",
         boxShadow: focused ? "var(--focus-ring)" : undefined,
-        cursor: props.disabled ? "not-allowed" : undefined,
+        cursor: props.disabled ? "default" : undefined,
         opacity: props.disabled ? 0.5 : 1,
         ...(props.style ?? {}),
       }}
@@ -731,7 +731,10 @@ export function Select(props: {
       onChange={(e: { target: { value: string } }) => props.onChange(e.target.value)}
       style={{
         ...FIELD_BASE,
-        cursor: props.disabled ? "not-allowed" : "pointer",
+        // select 的按钮区不吃底部 padding（顶部 4px 照算），FIELD_BASE 的竖直 padding 会把文字压低
+        padding: "0 8px",
+        height: 24,
+        cursor: props.disabled ? "default" : "pointer",
         opacity: props.disabled ? 0.5 : 1,
         ...(props.style ?? {}),
       }}
@@ -761,7 +764,7 @@ export function Checkbox(props: {
         gap: 8,
         fontSize: FONT_UI,
         color: textPrimary,
-        cursor: props.disabled ? "not-allowed" : "pointer",
+        cursor: props.disabled ? "default" : "pointer",
         opacity: props.disabled ? 0.5 : 1,
       }}
     >
