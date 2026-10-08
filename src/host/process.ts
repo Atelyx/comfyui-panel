@@ -7,7 +7,7 @@
  * 2. 包装层是 `cmd.exe /C`——只结束包装进程会把真正的服务留成孤儿，因此经 `spawn`
  *    拿到的句柄 `cancel()` 结束整棵进程树，而不是按命令行特征去找进程。
  */
-import type { AtelyxCtx, ShellProcessHandle } from "../ctx";
+import type { AtelyxCtx, ProcessHandle } from "../ctx";
 import type { ComfySettings } from "../settings";
 import { resolvePython } from "../settings";
 
@@ -119,7 +119,7 @@ export async function startComfy(
   platform: Platform,
   settings: ComfySettings,
   options: StartOptions,
-): Promise<ShellProcessHandle> {
+): Promise<ProcessHandle> {
   const cwd = settings.comfyDir.trim();
   if (!cwd) throw new Error("未配置 ComfyUI 目录");
   const tokens = buildStartTokens(settings);
@@ -127,7 +127,7 @@ export async function startComfy(
   const command = platform === "windows" ? "cmd.exe" : "sh";
   const args = runArgs(platform, tokens);
 
-  return ctx.shell.spawn({ command, args, cwd }, {
+  return ctx.process.spawn({ command, args, cwd }, {
     chunk: (data) => {
       for (const raw of String(data.data).split(/\r?\n/)) {
         const text = raw.trimEnd();

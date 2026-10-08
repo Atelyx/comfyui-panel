@@ -4,7 +4,7 @@
  * 与运行时分开：连接是网络层的事，进程是本机的事——用户可能自行启动服务（连接通但非本插件
  * 启动），也可能插件起了进程而服务尚未就绪，界面需要同时看到这两条信息。
  */
-import type { AtelyxCtx, ShellProcessHandle } from "../ctx";
+import type { AtelyxCtx, ProcessHandle } from "../ctx";
 import type { ComfySettings } from "../settings";
 import type { ComfyRuntime } from "../runtime";
 import { describeStartCommand, resolvePlatform, startComfy, type Platform } from "./process";
@@ -51,7 +51,7 @@ export class HostController {
   /** 首次用到时向Atelyx问一次并缓存。 */
   private platform: Platform | null = null;
   /** 本插件启动的进程句柄；停止与「是否在运行」都依它判断。 */
-  private handle: ShellProcessHandle | null = null;
+  private handle: ProcessHandle | null = null;
   /** 等待就绪期间进程退出或出错的原因；非空即终止等待，不再空等满超时。 */
   private died = "";
   /** 最后一条非空错误输出：进程没打印可读原因时，它就是最接近现场的信息。 */

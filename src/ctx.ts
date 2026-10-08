@@ -8,16 +8,20 @@ import type { Context } from "@atelyx/cordis";
  * 依赖声明见 `index.tsx`——这里用到的平台服务在插件运行时恒在。
  */
 
-/** 进程输出回调（`ctx.shell.spawn` 传 handlers 时启用）。 */
-export interface ShellStreamHandlers {
+/** 进程输出回调（`ctx.process.spawn` 传 handlers 时启用）。 */
+export interface ProcessStreamHandlers {
   chunk(data: { stream: "stdout" | "stderr"; data: string }): void;
   end(data: { code: number | null }): void;
   error(message: string): void;
 }
 
-/** `ctx.shell.spawn` 的进程句柄：`cancel` 结束该进程及其全部子孙。 */
-export interface ShellProcessHandle {
+/** `ctx.process.spawn` 的进程句柄：`cancel` 结束该进程及其全部子孙。 */
+export interface ProcessHandle {
   pid: number;
+  /** 向进程写入 stdin（可反复调用；进程已退出时 reject）。 */
+  write(data: string): Promise<void>;
+  /** 关闭 stdin（对端读到 EOF）。已退出或已关闭时为 no-op。 */
+  endInput(): Promise<void>;
   cancel(): Promise<void>;
 }
 
@@ -108,12 +112,12 @@ export interface AtelyxCtx extends Context {
     readFileDataUrl(path: string): Promise<string>;
     deleteFile(path: string): Promise<VaultWriteResult>;
   };
-  shell: {
+  process: {
     /** 启动长驻进程并立即拿到句柄（不等进程结束）。 */
     spawn(
       opts: { command: string; args?: string[]; cwd?: string; env?: Record<string, string> },
-      handlers?: ShellStreamHandlers,
-    ): Promise<ShellProcessHandle>;
+      handlers?: ProcessStreamHandlers,
+    ): Promise<ProcessHandle>;
   };
   vault: {
     readFile(file: string): Promise<string>;
