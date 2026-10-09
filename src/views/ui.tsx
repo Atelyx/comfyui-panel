@@ -56,7 +56,7 @@ export const SCROLLBAR_CSS = `
 `;
 
 /** 图标基座（lucide 的 24×24 线性风格）；不引图标库，图标即几条 path。 */
-function Svg(props: { size?: number; children?: unknown }): unknown {
+function Svg(props: { size?: number; className?: string; children?: unknown }): unknown {
   return (
     <svg
       width={props.size ?? 14}
@@ -67,6 +67,7 @@ function Svg(props: { size?: number; children?: unknown }): unknown {
       strokeWidth={2}
       strokeLinecap="round"
       strokeLinejoin="round"
+      className={props.className}
       style={{ flexShrink: 0 }}
     >
       {props.children}
@@ -176,6 +177,20 @@ export function ZapIcon(props: { size?: number }): unknown {
   return (
     <Svg size={props.size}>
       <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+    </Svg>
+  );
+}
+
+/**
+ * 生成图像（图片框 + 四角生成星 + 山线）：生图语义的图标，设置页 tab 等宿主小尺寸位用。
+ * 生成星按宿主 tab 图标契约接 className（宿主渲染时带布局类）。
+ */
+export function ImageSparkIcon(props: { size?: number; className?: string }): unknown {
+  return (
+    <Svg size={props.size} className={props.className}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M8.5 5.3Q9.4 7.6 11.7 8.5Q9.4 9.4 8.5 11.7Q7.6 9.4 5.3 8.5Q7.6 7.6 8.5 5.3Z" />
+      <path d="M21 15l-5-5L5 21" />
     </Svg>
   );
 }

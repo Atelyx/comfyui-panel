@@ -18,7 +18,7 @@ import { resetGenerateSession } from "./views/generateSession";
 import { OrchestratePanel } from "./views/OrchestratePanel";
 import { disposeOrchestrateFrame } from "./views/orchestrateFrame";
 import { SettingsView } from "./views/Settings";
-import { bgSecondary, border, FONT_CAPTION, textMuted } from "./views/ui";
+import { bgSecondary, border, FONT_CAPTION, ImageSparkIcon, textMuted } from "./views/ui";
 
 /** 与清单里的 name 一致。 */
 const PLUGIN_ID = "com.atelyx.comfyui-panel";
@@ -193,6 +193,7 @@ export default function apply(pluginCtx: AtelyxCtx): void {
       key: SETTING_KEY,
       label: "ComfyUI",
       component: ComfySettings,
+      icon: ImageSparkIcon,
     });
     return () => {
       offPanel();
