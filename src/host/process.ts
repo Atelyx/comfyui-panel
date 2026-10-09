@@ -1,32 +1,14 @@
 /**
  * 进程托管：按设置启动与停止本机 ComfyUI。
  *
- * 两条约束决定实现方式：
- * 1. 可执行程序只有 `cmd.exe`（Windows）/`sh`（Unix）被登记，启动命令必须写成整行经
- *    `/C`、`-c` 转达，不能直接指定 python。
- * 2. 包装层是 `cmd.exe /C`——只结束包装进程会把真正的服务留成孤儿，因此经 `spawn`
- *    拿到的句柄 `cancel()` 结束整棵进程树，而不是按命令行特征去找进程。
+ * 直接以 Python 可执行文件为启动程序（宿主对程序来源不设限制），不经 shell 包装，
+ * 参数逐项透传、引号不会被二次转义。停进程用句柄 `cancel()` 结束整棵进程树：
+ * ComfyUI 可能派生多进程子任务，只结束主进程会留孤儿。
  */
 import type { AtelyxCtx, ProcessHandle } from "../ctx";
 import type { ComfySettings } from "../settings";
 import { resolvePython } from "../settings";
 
-/** 平台决定命令写法，判错就启不动，因此取Atelyx给的值而不是猜 UA。 */
-export type Platform = "windows" | "unix";
-
-/** 命令写法只有这两种。 */
-export function toPlatform(raw: string): Platform {
-  return raw.startsWith("windows") ? "windows" : "unix";
-}
-
-export async function resolvePlatform(ctx: AtelyxCtx): Promise<Platform> {
-  try {
-    return toPlatform(await ctx.app.platform());
-  } catch {
-    // 取不到时按 Unix 处理，不会误用 Windows 专有写法
-    return "unix";
-  }
-}
 
 export interface StartOptions {
   /** 逐行日志。 */
@@ -38,11 +20,7 @@ export interface StartOptions {
 }
 
 /**
- * 启动参数：逐项分开。
- *
- * 不把整行命令（含引号）拼成一个参数——Atelyx逐项交给进程时，参数内部的引号会被转义成
- * `\"`，而 `cmd.exe` 不认这种转义（它只认 `""` 双写），命令会被拆坏。
- * 逐项传参由Atelyx按需加引号，cmd 能正确解析。
+ * 启动参数：逐项分开，不把整行命令拼成一个参数。
  *
  * 「允许远程启动」开启后，托管启动（含本机自行启动）一律把监听地址放在用户附加参数之后：
  * ComfyUI 的 argparse 对同名开关取最后一个，位置靠后才能覆盖用户自填的监听地址。
@@ -64,7 +42,7 @@ export function buildStartTokens(settings: ComfySettings): string[] {
  * 按命令行习惯切分用户填写的附加参数：空白分隔，双引号内保留空白并去掉引号。
  *
  * 不能简单地按空白切：参数值常是路径，形如 `--extra-model-paths-config "E:/my models/x.yaml"`，
- * 切开会把它拆成三段，引号还会被Atelyx转义成字面量，最终传给服务端的是错的路径。
+ * 切开会把它拆成三段，最终传给服务端的是错的路径。
  */
 function splitArgs(text: string): string[] {
   const out: string[] = [];
@@ -95,17 +73,9 @@ export function describeStartCommand(settings: ComfySettings): string {
   return buildStartTokens(settings).map(shellQuote).join(" ");
 }
 
-/** 含空白或引号时加引号（仅用于展示与 Unix 的 `-c` 串）。 */
+/** 含空白或引号时加引号（仅用于展示）。 */
 function shellQuote(value: string): string {
   return /[\s"]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
-}
-
-/** 按平台组装执行参数。 */
-function runArgs(platform: Platform, tokens: string[]): string[] {
-  // Windows：`/C` 之后逐项给，引号交给Atelyx按需添加
-  if (platform === "windows") return ["/C", ...tokens];
-  // Unix：`-c` 只吃一个脚本文本，在这里拼成命令行
-  return ["-c", tokens.map(shellQuote).join(" ")];
 }
 
 /**
@@ -116,18 +86,15 @@ function runArgs(platform: Platform, tokens: string[]): string[] {
  */
 export async function startComfy(
   ctx: AtelyxCtx,
-  platform: Platform,
   settings: ComfySettings,
   options: StartOptions,
 ): Promise<ProcessHandle> {
   const cwd = settings.comfyDir.trim();
   if (!cwd) throw new Error("未配置 ComfyUI 目录");
-  const tokens = buildStartTokens(settings);
+  // tokens[0] = Python 路径，其余为程序参数
+  const [python, ...args] = buildStartTokens(settings);
 
-  const command = platform === "windows" ? "cmd.exe" : "sh";
-  const args = runArgs(platform, tokens);
-
-  return ctx.process.spawn({ command, args, cwd }, {
+  return ctx.process.spawn({ command: python, args, cwd }, {
     chunk: (data) => {
       for (const raw of String(data.data).split(/\r?\n/)) {
         const text = raw.trimEnd();

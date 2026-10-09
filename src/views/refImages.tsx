@@ -6,6 +6,7 @@
  * 工作流没有 LoadImage 节点时整体隐藏；连线输入是只读拓扑，不在这里出现。
  */
 import React from "react";
+import type { AtelyxCtx } from "../ctx";
 import type { ApiPrompt, ObjectInfoMap } from "../comfy/types";
 import type { ComfyRuntime } from "../runtime";
 import { readField, type FieldSpec } from "../workflow/form";
@@ -16,6 +17,7 @@ interface RefImageStackProps {
   draft: ApiPrompt | null;
   objectInfo: ObjectInfoMap | null;
   runtime: ComfyRuntime;
+  ctx: AtelyxCtx;
   offline: boolean;
   /** 值写回草稿（置 dirty 并只拷贝该字段路径）；「从已有图选择」同步触发。 */
   onChange: (field: FieldSpec, value: string) => void;
@@ -51,6 +53,13 @@ export function RefImageStack(props: RefImageStackProps): unknown {
   }, [options, slots, props.draft]);
   if (slots.length === 0) return null;
 
+  /** 读剪贴板图片上传到该槽位；没有图或读取失败都以可读错误收场，不静默。 */
+  const pasteTo = async (slot: FieldSpec): Promise<void> => {
+    const dataUrl = await props.ctx.clipboard.readImage().catch(() => null);
+    if (!dataUrl) throw new Error("剪贴板里没有图片");
+    await props.onUpload(slot, await clipboardImageFile(dataUrl));
+  };
+
   const visible = expanded ? slots : slots.slice(0, MAX_VISIBLE);
   const extra = slots.length - visible.length;
 
@@ -70,6 +79,7 @@ export function RefImageStack(props: RefImageStackProps): unknown {
                 disabled={props.offline}
                 onChange={(value) => props.onChange(slot, value)}
                 onUpload={(file) => props.onUpload(slot, file)}
+                onPaste={() => pasteTo(slot)}
                 onError={props.onError}
               />
             </div>
@@ -100,7 +110,7 @@ export function RefImageStack(props: RefImageStackProps): unknown {
   );
 }
 
-/** 单个 LoadImage 槽位：缩略图 + 悬停面板（选已有图 / 上传 / 清空）。 */
+/** 单个 LoadImage 槽位：缩略图 + 悬停面板（选已有图 / 上传 / 粘贴 / 清空）。 */
 function RefSlot(props: {
   field: FieldSpec;
   filename: string;
@@ -109,6 +119,8 @@ function RefSlot(props: {
   disabled: boolean;
   onChange: (value: string) => void;
   onUpload: (file: File) => Promise<void>;
+  /** 读系统剪贴板图片并上传：剪贴板没有图时抛错由槽位展示。 */
+  onPaste: () => Promise<void>;
   onError: (message: string) => void;
 }): unknown {
   const fileRef = React.useRef<HTMLInputElement | null>(null);
@@ -134,6 +146,15 @@ function RefSlot(props: {
       .catch((err: unknown) => props.onError(err instanceof Error ? err.message : String(err)))
       .finally(() => setUploading(false));
     e.target.value = "";
+  };
+
+  const pasteFromClipboard = (): void => {
+    if (props.disabled || uploading) return;
+    setUploading(true);
+    props
+      .onPaste()
+      .catch((err: unknown) => props.onError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setUploading(false));
   };
 
   return (
@@ -212,6 +233,9 @@ function RefSlot(props: {
             <Button size="sm" disabled={props.disabled || uploading} onClick={pickFile}>
               {uploading ? "上传中…" : props.filename ? "替换" : "上传"}
             </Button>
+            <Button size="sm" disabled={props.disabled || uploading} onClick={pasteFromClipboard}>
+              粘贴
+            </Button>
             {props.filename ? <Button size="sm" onClick={() => props.onChange("")}>清空</Button> : null}
           </span>
         </div>
@@ -226,6 +250,12 @@ function RefSlot(props: {
       />
     </div>
   );
+}
+
+/** PNG dataURL → File：走既有上传链路（fetch data: 由浏览器解码字节）。 */
+async function clipboardImageFile(dataUrl: string): Promise<File> {
+  const blob = await (await fetch(dataUrl)).blob();
+  return new File([blob], `clipboard-${Date.now()}.png`, { type: "image/png" });
 }
 
 /**

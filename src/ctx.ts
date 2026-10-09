@@ -78,6 +78,9 @@ export interface RegisterSettingOptions {
   key: string;
   label: string;
   component: (() => unknown) | unknown;
+  /** 设置页 tab 图标（24 viewBox、stroke currentColor 的 SVG 组件；宿主传 size/className 渲染）。
+   *  缺省用宿主统一的插件图标。 */
+  icon?: (props: { size?: number; className?: string }) => unknown;
 }
 
 export interface RegisterCommandOptions {
@@ -88,11 +91,6 @@ export interface RegisterCommandOptions {
 }
 
 export interface AtelyxCtx extends Context {
-  /** Atelyx 平台信息（平台用于决定启动命令的写法）。 */
-  app: {
-    version(): Promise<string>;
-    platform(): Promise<string>;
-  };
   state: {
     read(): Promise<unknown>;
     write(data: unknown): Promise<void>;
@@ -129,6 +127,8 @@ export interface AtelyxCtx extends Context {
   dialog: {
     pickDirectory(): Promise<string | null>;
     pickFile(filters?: DialogFilter[]): Promise<string | null>;
+    /** 系统另存为对话框：用户选定保存位置，返回绝对路径；取消返回 null。 */
+    saveFile(opts?: { defaultPath?: string; filters?: DialogFilter[] }): Promise<string | null>;
   };
   notification: {
     notify(input: { message: string; level?: "info" | "success" | "warning" | "error"; title?: string }): string;
@@ -141,6 +141,8 @@ export interface AtelyxCtx extends Context {
     writeText(text: string): Promise<void>;
     /** 图片 dataURL 进系统剪贴板（预览右键复制用）。 */
     copyImage(dataUrl: string): Promise<void>;
+    /** 读系统剪贴板图片（PNG dataURL）；没有图片或读取失败返回 null。 */
+    readImage(): Promise<string | null>;
   };
   /**
    * 协作服务：同一协作空间内的成员与消息收发。

@@ -698,6 +698,7 @@ export function GeneratePanel(props: GeneratePanelProps): unknown {
                 draft={draft}
                 objectInfo={snapshot.objectInfo}
                 runtime={runtime}
+                ctx={ctx}
                 offline={offline}
                 onChange={(field, value) => setFieldValue(field, value)}
                 onUpload={uploadRefImage}

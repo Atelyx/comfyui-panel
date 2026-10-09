@@ -7,7 +7,7 @@
 import type { AtelyxCtx, ProcessHandle } from "../ctx";
 import type { ComfySettings } from "../settings";
 import type { ComfyRuntime } from "../runtime";
-import { describeStartCommand, resolvePlatform, startComfy, type Platform } from "./process";
+import { describeStartCommand, startComfy } from "./process";
 
 export interface HostSnapshot {
   /** 是否由本插件启动。 */
@@ -48,8 +48,6 @@ export class HostController {
   private settings: ComfySettings;
   private readonly listeners = new Set<() => void>();
   private snap: HostSnapshot = EMPTY;
-  /** 首次用到时向Atelyx问一次并缓存。 */
-  private platform: Platform | null = null;
   /** 本插件启动的进程句柄；停止与「是否在运行」都依它判断。 */
   private handle: ProcessHandle | null = null;
   /** 等待就绪期间进程退出或出错的原因；非空即终止等待，不再空等满超时。 */
@@ -64,11 +62,6 @@ export class HostController {
   constructor(ctx: AtelyxCtx, settings: ComfySettings) {
     this.ctx = ctx;
     this.settings = settings;
-  }
-
-  private async getPlatform(): Promise<Platform> {
-    if (this.platform === null) this.platform = await resolvePlatform(this.ctx);
-    return this.platform;
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -168,7 +161,7 @@ export class HostController {
     this.log(`$ ${line}`);
 
     try {
-      const handle = await startComfy(this.ctx, await this.getPlatform(), this.settings, {
+      const handle = await startComfy(this.ctx, this.settings, {
         onLog: (text, stream) => {
           if (stream === "stderr" && text.trim()) this.lastStderr = text.trim();
           this.log(text, stream);

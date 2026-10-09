@@ -30,6 +30,7 @@ import {
   Empty,
   success,
   ImageIcon,
+  SaveIcon,
   SquareIcon,
   textMuted,
   textPrimary,
@@ -139,6 +140,25 @@ export function RecordFlow(props: RecordFlowProps): unknown {
     [props.ctx, props.runtime],
   );
 
+  /**
+   * 预览右键「另存为…」：系统对话框选定位置后落盘；用户取消返回 null（不提示）。
+   * 取字节的口径与下载一致（本地副本优先、直连兜底，都在 runtime 里）。
+   */
+  const saveAsPreviewImage = React.useCallback(
+    async (item: ResultImage): Promise<boolean | null> => {
+      const path = await props.ctx.dialog.saveFile({
+        defaultPath: item.ref.filename,
+        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+      });
+      if (!path) return null;
+      const dataUrl = await props.runtime.resultImageDataUrl(item);
+      const result = await props.ctx.fs.writeFileBase64(path, base64Of(dataUrl));
+      if (!result.ok) throw new Error(result.summary);
+      return true;
+    },
+    [props.ctx, props.runtime],
+  );
+
   /** 读记录的本地副本 dataURL；无副本或读取失败返回 null。 */
   const resolveLocal = React.useCallback(
     (item: ResultImage): Promise<string | null> => props.runtime.localImageDataUrl(item),
@@ -240,6 +260,7 @@ export function RecordFlow(props: RecordFlowProps): unknown {
             onClose={() => setPreviewKey(null)}
             onCopyImage={() => copyPreviewImage(previewed)}
             onDownloadImage={() => downloadPreviewImage(previewed)}
+            onSaveAsImage={() => saveAsPreviewImage(previewed)}
           />
         ) : null}
       </div>
@@ -421,6 +442,11 @@ function formatTime(ts: number): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** dataURL → 纯 base64（剥掉 `data:` 前缀），写盘接口只收 base64 字节。 */
+function base64Of(dataUrl: string): string {
+  return dataUrl.slice(dataUrl.indexOf(",") + 1);
+}
+
 /** 图片展示源：在线地址先行，加载失败降级本地副本，副本也没有就落占位。 */
 function useImageSrc(
   onlineUrl: string,
@@ -585,8 +611,9 @@ function clampRatio(ratio: number): number {
 const NOTICE_MS = 2500;
 
 /**
- * 大图遮罩：点击遮罩或 Esc 关闭；右键（图上或遮罩空白处）弹「复制图片 / 下载图片」，
- * 动作成败以 boolean 返回、在遮罩底部就地提示。菜单开着时 Esc 只关菜单不连关预览。
+ * 大图遮罩：点击遮罩或 Esc 关闭；右键（图上或遮罩空白处）弹「复制图片 / 下载图片 / 另存为…」，
+ * 动作成败以 boolean 返回、在遮罩底部就地提示（取消 = null，不提示）。
+ * 菜单开着时 Esc 只关菜单不连关预览。
  */
 function PreviewOverlay(props: {
   item: ResultImage;
@@ -595,6 +622,7 @@ function PreviewOverlay(props: {
   onClose: () => void;
   onCopyImage: () => Promise<boolean>;
   onDownloadImage: () => Promise<boolean>;
+  onSaveAsImage: () => Promise<boolean | null>;
 }): unknown {
   const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
   const [notice, setNotice] = React.useState<{ text: string; kind: "success" | "error" } | null>(null);
@@ -617,12 +645,15 @@ function PreviewOverlay(props: {
     return () => window.removeEventListener("keydown", onKey);
   }, [menu, props]);
 
-  /** 执行菜单动作：关菜单 → 等结果 → 就地提示。 */
+  /** 执行菜单动作：关菜单 → 等结果 → 就地提示；取消（null）不提示。 */
   const runAction = React.useCallback(
-    (action: () => Promise<boolean>, okText: string, failText: string) => {
+    (action: () => Promise<boolean | null>, okText: string, failText: string) => {
       setMenu(null);
       void action()
-        .then((ok) => setNotice({ text: ok ? okText : failText, kind: ok ? "success" : "error" }))
+        .then((ok) => {
+          if (ok === null) return;
+          setNotice({ text: ok ? okText : failText, kind: ok ? "success" : "error" });
+        })
         .catch(() => setNotice({ text: failText, kind: "error" }));
     },
     [],
@@ -673,6 +704,12 @@ function PreviewOverlay(props: {
           >
             <DownloadIcon size={13} />
             下载图片
+          </ContextMenuItem>
+          <ContextMenuItem
+            onClick={() => runAction(props.onSaveAsImage, "已另存", "另存失败，请重试")}
+          >
+            <SaveIcon size={13} />
+            另存为…
           </ContextMenuItem>
         </ContextMenu>
       ) : null}
