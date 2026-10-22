@@ -33,20 +33,10 @@ pub enum Channel {
     Offline,
 }
 
-/// 当前仓库类型：仅个人仓库（Local）可落库；协作空间（Space）与尚未收到切换事件的未知态都禁用
-/// ——落库需要仓库根路径，未知/协作空间下根路径为空，物理上无法写入。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VaultKind {
-    Local,
-    Space,
-    Unknown,
-}
-
 /// 面板消费的完整快照。
 #[derive(Clone, Debug)]
 pub struct RuntimeSnapshot {
     pub channel: Channel,
-    pub vault_kind: VaultKind,
     pub probing: bool,
     pub system_stats: Option<Value>,
     pub queue_running: Vec<Value>,
@@ -64,7 +54,6 @@ impl Default for RuntimeSnapshot {
     fn default() -> Self {
         RuntimeSnapshot {
             channel: Channel::Offline,
-            vault_kind: VaultKind::Unknown,
             probing: false,
             system_stats: None,
             queue_running: Vec::new(),

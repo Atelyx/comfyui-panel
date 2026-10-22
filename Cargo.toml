@@ -1,6 +1,6 @@
 [package]
 name = "comfyui-panel"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Atelyx 的 ComfyUI 原生插件：直连本机 ComfyUI，挑工作流、调参、排队生成、看实时进度，并把结果存进当前仓库；托管启停 ComfyUI 进程"
@@ -24,10 +24,8 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 # clientId / originId / 随机种子取系统熵源
 getrandom = "0.2"
-# 参考图粘贴：宿主 clipboard 能力面只给文本，剪贴板位图由本进程直读系统剪贴板
-arboard = "3.7"
-# 剪贴板位图是裸 RGBA8，须编成 PNG 才能走 /upload/image；只启 png 编码
-image = { version = "0.25", default-features = false, features = ["png"] }
+# 参考图粘贴：宿主 clipboard 面返回 PNG 的 base64，本进程只做解码
+base64 = "0.22"
 
 [profile.release]
 strip = true

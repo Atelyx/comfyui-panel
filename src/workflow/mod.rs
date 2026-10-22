@@ -4,3 +4,4 @@ pub mod convert;
 pub mod files;
 pub mod form;
 pub mod library;
+pub mod sizing;

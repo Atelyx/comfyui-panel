@@ -1,9 +1,9 @@
-//! 结果落库：把图片字节直接写进当前仓库的落库目录。
+//! 结果落库：把图片字节写进当前仓库的落库目录。
 //!
-//! 用 `std::fs` 写入仓库根下的子目录：插件本就能使用 `std::fs`，权限声明仅作透明度。
-//! 仓库根与类型来自宿主 `vault:switch` 事件：个人仓库给出 root，协作空间不给路径、落库禁用。
+//! 写入经宿主 `vault` 能力面的二进制写面，与宿主自身的写盘 / 协作广播同一出口；
+//! 本地仓库与协作空间同构，插件不感知容器类型。落库目录、文件名与重名避让都在这里定口径。
 
-use std::path::PathBuf;
+use atelyx_plugin_sdk::Context;
 
 use crate::comfy::types::ImageRef;
 
@@ -12,6 +12,12 @@ const UNSAFE_CHARS: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
 /// 默认落库目录（相对仓库根）；设置里的落库目录留空时用这个。
 const DEFAULT_FOLDER: &str = "comfyui";
+
+/// 重名避让的最大尝试次数（原名 + `-2` … `-100`）。
+const MAX_NAME_ATTEMPTS: u32 = 100;
+
+/// 宿主仓库二进制写面单次上限；超过会在分派处被拒，本地先给出可操作的替代方案。
+const VAULT_WRITE_LIMIT: usize = 32 * 1024 * 1024;
 
 /// 取安全文件名：非法字符替换为 `_`、去前导点、trim；空则按时间戳兜底。
 /// 分隔符 `/`、`\` 一并替换，结果不含路径分隔，无法越出落库目录。
@@ -47,12 +53,13 @@ pub fn save_as_name(file_name: &str) -> String {
     }
 }
 
-/// 净化单个路径段：非法字符（含分隔符、NUL）替换为 `_` 并 trim。
+/// 净化单个路径段：非法字符（含分隔符、NUL）替换为 `_`、去前导点并 trim（宿主仓库面不开放隐藏段）。
 fn sanitize_chars(seg: &str) -> String {
     seg.chars()
         .map(|c| if UNSAFE_CHARS.contains(&c) || c == '\0' { '_' } else { c })
         .collect::<String>()
         .trim()
+        .trim_start_matches('.')
         .to_string()
 }
 
@@ -72,14 +79,43 @@ fn folder_of(archive_folder: &str) -> String {
     }
 }
 
-/// 写入图片到 `{root}/{folder}/comfyui-{safe}`，返回相对仓库根的路径（斜杠分隔）。
-pub fn save_to_repo(root: &str, archive_folder: &str, image_ref: &ImageRef, bytes: &[u8]) -> Result<String, String> {
+/// 重名避让：首次用原名，之后在扩展名前追加 `-2`、`-3`…（无扩展名时追加在末尾）。
+fn numbered_name(name: &str, attempt: u32) -> String {
+    if attempt == 0 {
+        return name.to_string();
+    }
+    let suffix = format!("-{}", attempt + 1);
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => format!("{}{}{}", &name[..dot], suffix, &name[dot..]),
+        _ => format!("{name}{suffix}"),
+    }
+}
+
+/// 是否超过仓库写面上限：等于上限仍可写，仅超出拒绝。
+fn exceeds_write_limit(len: usize) -> bool {
+    len > VAULT_WRITE_LIMIT
+}
+
+/// 写入 `{folder}/comfyui-{safe}`（重名自动加序号），返回相对仓库根的路径（斜杠分隔）。
+pub async fn save(ctx: &Context, archive_folder: &str, image_ref: &ImageRef, bytes: &[u8]) -> Result<String, String> {
+    if exceeds_write_limit(bytes.len()) {
+        return Err(format!(
+            "图片超过 {} MiB，无法存入仓库，请改用另存为",
+            VAULT_WRITE_LIMIT / (1024 * 1024)
+        ));
+    }
     let folder = folder_of(archive_folder);
     let name = archive_name(&image_ref.filename);
-    let dir = PathBuf::from(root).join(&folder);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败：{e}"))?;
-    std::fs::write(dir.join(&name), bytes).map_err(|e| format!("写入文件失败：{e}"))?;
-    Ok(format!("{folder}/{name}"))
+    for attempt in 0..MAX_NAME_ATTEMPTS {
+        let relative = format!("{folder}/{}", numbered_name(&name, attempt));
+        let exists = ctx.vault_exists(&relative).await.map_err(|e| format!("检查仓库文件失败：{e}"))?;
+        if exists {
+            continue;
+        }
+        ctx.vault_write_binary(&relative, bytes).await.map_err(|e| format!("写入仓库失败：{e}"))?;
+        return Ok(relative);
+    }
+    Err(format!("同名文件过多，无法在 {folder} 下生成新文件名"))
 }
 
 #[cfg(test)]
@@ -113,6 +149,7 @@ mod tests {
     fn folder_default_and_trim() {
         assert_eq!(folder_of(""), "comfyui");
         assert_eq!(folder_of("  /out/  "), "out");
+        assert_eq!(folder_of(".hidden/out"), "hidden/out", "隐藏段去掉前导点，避免宿主拒绝");
     }
 
     #[test]
@@ -121,5 +158,20 @@ mod tests {
         assert_eq!(folder_of("a/../b"), "a/b", "中间 .. 被丢弃");
         assert_eq!(folder_of("out/2026"), "out/2026", "合法多级子目录保留");
         assert_eq!(folder_of("../.."), "comfyui", "全是 .. 段则回落默认目录");
+    }
+
+    #[test]
+    fn write_limit_rejects_only_above_cap() {
+        assert!(!exceeds_write_limit(0));
+        assert!(!exceeds_write_limit(VAULT_WRITE_LIMIT), "恰好等于上限仍可写");
+        assert!(exceeds_write_limit(VAULT_WRITE_LIMIT + 1));
+    }
+
+    #[test]
+    fn duplicate_name_appends_suffix_before_extension() {
+        assert_eq!(numbered_name("comfyui-a.png", 0), "comfyui-a.png");
+        assert_eq!(numbered_name("comfyui-a.png", 1), "comfyui-a-2.png");
+        assert_eq!(numbered_name("comfyui-a.tar.gz", 2), "comfyui-a.tar-3.gz", "只认最后一个点后的扩展名");
+        assert_eq!(numbered_name("comfyui-a", 1), "comfyui-a-2", "无扩展名追加在末尾");
     }
 }

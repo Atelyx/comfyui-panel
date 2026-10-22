@@ -8,6 +8,7 @@ mod archive;
 mod clipboard;
 mod comfy;
 mod controller;
+mod gallery;
 mod history;
 mod launcher;
 mod runtime;
@@ -17,9 +18,9 @@ mod workflow;
 
 use std::sync::OnceLock;
 
-use atelyx_plugin_sdk::protocol::event::PublishParams;
 use atelyx_plugin_sdk::protocol::method::{
-    ProcessEventParams, SurfaceAttachedParams, SurfaceDetachedParams, ViewEventParams,
+    CanvasResizedParams, ProcessEventParams, SurfaceAttachedParams, SurfaceDetachedParams,
+    ViewEventParams,
 };
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 
@@ -69,9 +70,9 @@ impl PluginHandler for Handler {
         }
     }
 
-    async fn on_host_event(&self, _ctx: &Context, params: PublishParams) {
+    async fn on_canvas_resized(&self, _ctx: &Context, params: CanvasResizedParams) {
         if let Some(app) = self.app() {
-            app.on_host_event(params);
+            app.on_canvas_resized(params);
         }
     }
 }

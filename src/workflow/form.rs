@@ -340,9 +340,150 @@ pub fn field_label(input: &str) -> &'static str {
     }
 }
 
-/// 是否「主/正向」提示词输入名（不含 negative，反向提示词被有意排除）。
-fn is_prompt_input(input: &str) -> bool {
+/// 是否「主/正向」提示词输入名（不含 negative，反向提示词被有意排除）。主提示词候选与记录标题共用这一份口径。
+pub fn is_prompt_input(input: &str) -> bool {
     matches!(input, "text" | "positive" | "empty_prompt" | "prompt")
+}
+
+/// 主提示词候选：未连线的提示词字段，按节点迭代顺序（连线输入由拓扑决定，手改等于改结构）。
+pub fn prompt_candidates(fields: &[FieldSpec]) -> Vec<&FieldSpec> {
+    fields.iter().filter(|f| !f.connected && is_prompt_input(&f.input)).collect()
+}
+
+/// 定位主提示词字段：优先用户手选的 `节点id.输入`（仅当它仍在候选里，切换工作流后自动回落），
+/// 未手选或已失效时取首个候选。第二项标记是否命中手选，界面据此显示「自动」还是具体节点。
+pub fn resolve_prompt_field<'a>(fields: &'a [FieldSpec], preferred: Option<&str>) -> Option<(&'a FieldSpec, bool)> {
+    let candidates = prompt_candidates(fields);
+    let explicit = preferred.is_some_and(|key| candidates.iter().any(|f| f.key() == key));
+    let field = match preferred {
+        Some(key) if explicit => candidates.iter().find(|f| f.key() == key),
+        _ => candidates.first(),
+    }?;
+    Some((*field, explicit))
+}
+
+/// 常用参数输入名：决定高级表单里节点的默认展开与组内排序，值归入这两类之外的都算冷门。
+const COMMON_INPUTS: &[&str] = &[
+    "text",
+    "positive",
+    "empty_prompt",
+    "prompt",
+    "negative",
+    "negative_prompt",
+    "seed",
+    "noise_seed",
+    "steps",
+    "cfg",
+    "sampler_name",
+    "scheduler",
+    "denoise",
+    "width",
+    "height",
+    "batch_size",
+];
+
+/// 是否常用参数（按输入名判定，与节点类型无关）。
+pub fn is_common_field(field: &FieldSpec) -> bool {
+    COMMON_INPUTS.contains(&field.input.as_str())
+}
+
+/// 高级表单参与的字段：排除参考图槽位与其配套的 `upload` 按钮位（两者由参考图区接管，
+/// 候选来自 input 目录文件清单、字段推导拿不到真实取值）。排除口径与 [`ref_slots`] 同源，
+/// 同一个字段不会既进表单又画进槽位；连线的 `image` 仍以只读来源进表单。
+pub fn form_fields(fields: &[FieldSpec]) -> Vec<&FieldSpec> {
+    fields
+        .iter()
+        .filter(|f| !is_image_input(f) && !is_upload_button(f))
+        .collect()
+}
+
+/// 参考图槽位：未连线的 LoadImage 类 `image` 输入，一个槽位对应一张参考图。
+pub fn ref_slots(fields: &[FieldSpec]) -> Vec<&FieldSpec> {
+    fields.iter().filter(|f| is_image_input(f)).collect()
+}
+
+/// `upload` 输入位：LoadImage 的上传按钮标记，不单独成槽、也不进表单。
+fn is_upload_button(field: &FieldSpec) -> bool {
+    !field.connected && field.input == "upload" && class_suggests_image(&field.class_type)
+}
+
+/// input 目录里的已有图候选：`image` 输入声明为 `["COMBO", { image: [...] }]`，文件清单在
+/// `image` 键下（[`combo_options`] 只认 `options` 键，按那条路取不到真实候选）。
+pub fn image_candidates(object_info: Option<&Value>, class_type: &str) -> Vec<String> {
+    let meta = match object_info
+        .and_then(|oi| oi.get(class_type))
+        .and_then(|class| class.get("input"))
+        .and_then(|input| input.get("required"))
+        .and_then(|required| required.get("image"))
+        .and_then(Value::as_array)
+        .and_then(|schema| schema.get(1))
+    {
+        Some(meta) => meta,
+        None => return Vec::new(),
+    };
+    match meta.get("image").and_then(Value::as_array) {
+        Some(list) => list.iter().map(json_to_string).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// 按关键词筛选字段：命中输入名、节点标题或类名（大小写不敏感）；空关键词不过滤。
+pub fn filter_fields<'a>(fields: &'a [FieldSpec], keyword: &str) -> Vec<&'a FieldSpec> {
+    let needle = keyword.trim().to_lowercase();
+    if needle.is_empty() {
+        return form_fields(fields);
+    }
+    form_fields(fields)
+        .into_iter()
+        .filter(|f| {
+            f.input.to_lowercase().contains(&needle)
+                || f.node_label.to_lowercase().contains(&needle)
+                || f.class_type.to_lowercase().contains(&needle)
+        })
+        .collect()
+}
+
+/// 一个节点的参数分组（含全部字段，组内与组间均已排序）。
+#[derive(Debug)]
+pub struct NodeGroup<'a> {
+    pub node_id: &'a str,
+    pub label: &'a str,
+    /// 组内是否有常用参数：决定换工作流时的默认展开态。
+    pub has_common: bool,
+    pub fields: Vec<&'a FieldSpec>,
+}
+
+/// 按节点分组：常用参数排在组内前面，含常用参数的节点排在组间前面；两侧都保持节点迭代顺序稳定。
+pub fn group_by_node<'a>(fields: &[&'a FieldSpec]) -> Vec<NodeGroup<'a>> {
+    let mut groups: Vec<NodeGroup<'a>> = Vec::new();
+    for field in fields {
+        match groups.iter_mut().find(|g| g.node_id == field.node_id) {
+            Some(group) => {
+                group.has_common |= is_common_field(field);
+                group.fields.push(field);
+            }
+            None => groups.push(NodeGroup {
+                node_id: &field.node_id,
+                label: &field.node_label,
+                has_common: is_common_field(field),
+                fields: vec![field],
+            }),
+        }
+    }
+    for group in groups.iter_mut() {
+        group.fields.sort_by_key(|f| !is_common_field(f));
+    }
+    groups.sort_by_key(|g| !g.has_common);
+    groups
+}
+
+/// 解析 `"1:1 (Square)"` 这类带注释的比例串：取开头的 `宽:高`，非正数或不合式返回 None。
+pub fn parse_aspect_pair(value: &str) -> Option<(f64, f64)> {
+    let head = value.trim().split(['(', '（']).next().unwrap_or("").trim();
+    let (w, h) = head.split_once(':')?;
+    let w: f64 = w.trim().parse().ok()?;
+    let h: f64 = h.trim().parse().ok()?;
+    (w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()).then_some((w, h))
 }
 
 /// 取本批提交的主提示词文本：按节点顺序的首个未连线且非空的提示词字段值。取不到返回空串。
@@ -427,6 +568,118 @@ mod tests {
             "1": {"class_type": "P", "inputs": {"negative": "neg", "text": "hello"}},
         });
         assert_eq!(prompt_text_of(&prompt), "hello");
+    }
+
+    #[test]
+    fn prompt_field_prefers_explicit_key_then_first_candidate() {
+        let mut connected = string_field();
+        connected.node_id = "1".into();
+        connected.input = "text".into();
+        connected.connected = true;
+        let mut negative = string_field();
+        negative.node_id = "2".into();
+        negative.input = "negative".into();
+        let mut first = string_field();
+        first.node_id = "3".into();
+        first.input = "positive".into();
+        let mut second = string_field();
+        second.node_id = "4".into();
+        second.input = "text".into();
+        let fields = vec![connected, negative, first, second];
+
+        let (field, explicit) = resolve_prompt_field(&fields, None).expect("有候选");
+        assert_eq!((field.node_id.as_str(), explicit), ("3", false));
+        let (field, explicit) = resolve_prompt_field(&fields, Some("4.text")).expect("有候选");
+        assert_eq!((field.node_id.as_str(), explicit), ("4", true));
+        // 手选的字段已不存在（切换工作流）：回落到首个候选，并按「自动」展示
+        let (field, explicit) = resolve_prompt_field(&fields, Some("9.text")).expect("有候选");
+        assert_eq!((field.node_id.as_str(), explicit), ("3", false));
+    }
+
+    #[test]
+    fn aspect_pair_accepts_annotated_value_only_when_positive() {
+        assert_eq!(parse_aspect_pair("1:1 (Square)"), Some((1.0, 1.0)));
+        assert_eq!(parse_aspect_pair("  21:9 "), Some((21.0, 9.0)));
+        assert_eq!(parse_aspect_pair("16：9"), None);
+        assert_eq!(parse_aspect_pair("0:2"), None);
+        assert_eq!(parse_aspect_pair("auto"), None);
+    }
+
+    #[test]
+    fn groups_put_common_fields_and_their_nodes_first() {
+        let rare = |node_id: &str, input: &str| {
+            let mut f = string_field();
+            f.node_id = node_id.into();
+            f.input = input.into();
+            f
+        };
+        // 冷门节点先出现，仍排在常用节点之后；组内常用参数排前
+        let blur = rare("3", "blur_radius");
+        let gamma = rare("3", "gamma");
+        let cfg = rare("1", "cfg");
+        let steps = rare("1", "steps");
+        let grouped = group_by_node(&[&blur, &cfg, &gamma, &steps]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].node_id, "1");
+        assert_eq!(grouped[0].fields.iter().map(|f| f.input.as_str()).collect::<Vec<_>>(), ["cfg", "steps"]);
+        assert_eq!(grouped[1].node_id, "3");
+        assert_eq!(grouped[1].fields.iter().map(|f| f.input.as_str()).collect::<Vec<_>>(), ["blur_radius", "gamma"]);
+        assert!(!grouped[1].has_common);
+    }
+
+    #[test]
+    fn form_fields_drop_unconnected_load_image_inputs() {
+        let mut image = string_field();
+        image.class_type = "LoadImage".into();
+        image.input = "image".into();
+        let mut upload = image.clone();
+        upload.input = "upload".into();
+        upload.node_id = "9".into();
+        let mut connected = image.clone();
+        connected.node_id = "8".into();
+        connected.connected = true;
+        let mut other = image.clone();
+        other.node_id = "7".into();
+        other.class_type = "VaeImageApply".into();
+        let fields = vec![image, upload, connected, other];
+        let kept: Vec<&str> = form_fields(&fields).iter().map(|f| f.node_id.as_str()).collect();
+        assert_eq!(kept, ["8", "7"]);
+        // 连线的 image 仍进表单（只读来源），关键词筛选也走同一份排除口径
+        let hit: Vec<&str> = filter_fields(&fields, "IMAGE").iter().map(|f| f.node_id.as_str()).collect();
+        assert_eq!(hit, ["8", "7"]);
+        assert_eq!(filter_fields(&fields, "  ").len(), 2);
+    }
+
+    /// 参考图槽位与表单字段互斥：同一个 `image` 输入不能两边都出现。
+    #[test]
+    fn ref_slots_and_form_fields_are_disjoint() {
+        let mut mask = string_field();
+        mask.node_id = "5".into();
+        mask.class_type = "LoadImageMask".into();
+        mask.input = "image".into();
+        let mut upload = mask.clone();
+        upload.node_id = "6".into();
+        upload.input = "upload".into();
+        let mut text = string_field();
+        text.node_id = "7".into();
+        text.input = "text".into();
+        let fields = vec![mask, upload, text];
+        let slots: Vec<&str> = ref_slots(&fields).iter().map(|f| f.node_id.as_str()).collect();
+        let kept: Vec<&str> = form_fields(&fields).iter().map(|f| f.node_id.as_str()).collect();
+        assert_eq!(slots, ["5"], "upload 位不算槽位");
+        assert_eq!(kept, ["7"], "模糊匹配到的图片类输入也交给参考图区");
+    }
+
+    #[test]
+    fn image_candidates_reads_file_list_under_image_key() {
+        let object_info = json!({
+            "LoadImage": { "input": { "required": { "image": ["COMBO", { "image": ["a.png", "sub/b.png"], "upload": { "image": "image/upload" } }] } } },
+            "KSampler": { "input": { "required": { "sampler_name": [["euler", "dpmpp_2m"]] } } },
+        });
+        assert_eq!(image_candidates(Some(&object_info), "LoadImage"), ["a.png", "sub/b.png"]);
+        // 没有该声明的类与节点定义缺失都回空清单，不报错
+        assert!(image_candidates(Some(&object_info), "KSampler").is_empty());
+        assert!(image_candidates(None, "LoadImage").is_empty());
     }
 
     fn string_field() -> FieldSpec {

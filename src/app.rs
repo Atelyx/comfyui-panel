@@ -4,30 +4,32 @@
 //! 重建整棵界面树提交给已挂载的面。约束——绝不持 `MutexGuard` 跨 `await`：需要 IO 时先在锁内
 //! 取出输入（克隆）、释放锁、`await` 网络/磁盘、再重新加锁写回，慢 IO 因此不卡住整棵重绘。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use atelyx_plugin_sdk::protocol::event::{name::VAULT_SWITCH, PublishParams, VaultSwitchPayload};
 use atelyx_plugin_sdk::protocol::method::{
-    ContributionSlot, FileFilter, NotificationLevel, PickFileParams, SurfaceKind,
-    SurfaceAttachedParams, SurfaceDetachedParams, ViewEventParams, WindowOpenParams,
+    CanvasResizedParams, ContributionSlot, FileFilter, NotificationLevel, PickFileParams, ScrollEdge,
+    SurfaceKind, SurfaceAttachedParams, SurfaceDetachedParams, ViewEventParams, WindowOpenParams,
 };
-use atelyx_plugin_sdk::protocol::view::{EventValue, ViewEvent};
+use atelyx_plugin_sdk::protocol::view::{CanvasPointer, EventValue, MouseButton, PaddingSpec, ViewEvent};
 use atelyx_plugin_sdk::Context;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
+use crate::comfy::types::ImageRef;
 use crate::comfy::ws::{run as ws_run, WsEvent};
 use crate::controller::{self, HostState};
-use crate::history::{CopyStore, ResultImage, HISTORY_LIMIT};
-use crate::runtime::{self, Channel, Runtime, VaultKind};
+use crate::gallery;
+use crate::history::{ref_copy_name, ref_path, CopyStore, RefCache, ResultImage, HISTORY_LIMIT};
+use crate::runtime::{self, Channel, Runtime};
 use crate::settings::{base_url, ComfySettings, ProcessMode};
 use crate::views::{
-    self, P_CLEAR, P_COMBO, P_BOOL, P_NUM, P_PASTE, P_PREVIEW, P_SAVE, P_SAVE_AS, P_SEED, P_TEXT, P_UPLOAD,
+    self, P_BOOL, P_CLEAR, P_COMBO, P_GROUP, P_NUM, P_PASTE, P_REF_PICK, P_SEED, P_TEXT, P_UPLOAD,
 };
 use crate::workflow::form;
+use crate::workflow::sizing;
 
 /// 生成面板贡献 id（同时是挂载后的 surfaceId，不得含 `:`）。
 pub const SURFACE_PANEL: &str = "generate";
@@ -48,8 +50,13 @@ const WS_RECONNECT: Duration = Duration::from_millis(4000);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(600);
 /// 每轮补抓缺口的最大条数（限制抓取重试的开销，优先补最近的结果）。
 const RECAPTURE_BATCH: usize = 4;
+/// 记录流首屏展示的记录批次数（一批 = 一个 promptId 的同批产出）。
+const FLOW_BATCH_INIT: usize = 8;
+/// 「显示更早」每次追加的批次数。
+const FLOW_BATCH_STEP: usize = 8;
 
-/// 界面之外的会话态：当前工作流、参数草稿、随机种子勾选、参考图动作反馈、预览窗口条目。不落盘。
+/// 界面之外的会话态：当前工作流、参数草稿、随机种子勾选、记录流与生成坞的展开态、参考图缩略、
+/// 预览窗口条目。不落盘。
 #[derive(Default)]
 pub struct Session {
     pub workflow_id: Option<String>,
@@ -61,6 +68,24 @@ pub struct Session {
     pub notice: String,
     /// 预览窗口当前展示的结果 key。
     pub preview_key: Option<String>,
+    /// 记录流画布宽度：宿主 `canvas.resized` 回报的真实分配宽度，布局坐标与命中都按它算。
+    pub gallery_width: f32,
+    /// 上一次提交的记录流布局：指针命中按它算，用户点的就是他刚看到的那一版。
+    pub flow: Option<gallery::FlowLayout>,
+    /// 记录流已展示的记录批次数，「显示更早」递增。
+    pub shown_batches: usize,
+    /// 用户是否停在记录流末端（宿主回发的滚动位置）：只有在看最新一屏时，新结果才把视口贴到底。
+    pub flow_at_bottom: bool,
+    /// 下一次渲染后把记录流滚到底：新结果进来时代码树还没更新，滚动只能在提交之后发。
+    pub flow_stick: bool,
+    pub params_open: bool,
+    pub param_filter: String,
+    /// 节点分组展开覆盖项：未记录的节点按「有没有常用参数」决定默认展开。
+    pub group_toggles: BTreeMap<String, bool>,
+    /// 主提示词字段手选键（`节点id.输入名`），缺省按自动推断。
+    pub prompt_key: Option<String>,
+    /// 参考图缩略副本缓存（私有目录 `refs/`）。
+    pub refs: RefCache,
 }
 
 /// 状态真源。
@@ -70,7 +95,6 @@ pub struct Core {
     pub runtime: Runtime,
     pub host: HostState,
     pub session: Session,
-    pub vault_root: Option<String>,
 }
 
 /// 一次 WS 连接的关停把手：标志供读任务自检退避，句柄供监督任务在空闲期直接中止。
@@ -110,6 +134,8 @@ impl App {
         let private = ctx.private_dir().await.unwrap_or_else(|_| "data".into());
         let store = CopyStore::new(private);
         store.ensure_dir();
+        // 缩略缓存不跨进程：上一代留下的参考图副本已无人认领，装载时清掉，避免私有目录只增不减。
+        store.clear_refs();
 
         let mut runtime = Runtime::new();
         runtime.load_persisted(origin_id, history);
@@ -119,8 +145,13 @@ impl App {
             attached: BTreeSet::new(),
             runtime,
             host: HostState::default(),
-            session: Session { draft: json!({}), ..Default::default() },
-            vault_root: None,
+            session: Session {
+                draft: json!({}),
+                shown_batches: FLOW_BATCH_INIT,
+                flow_at_bottom: true,
+                flow_stick: true,
+                ..Default::default()
+            },
         };
 
         let (version_tx, version_rx) = watch::channel(0u64);
@@ -134,6 +165,17 @@ impl App {
             save_gen: AtomicU64::new(0),
         });
 
+        for surface in [SURFACE_PANEL, SURFACE_SETTINGS, SURFACE_PREVIEW] {
+            let build_app = Arc::clone(&app);
+            app.ctx
+                .ui()
+                .mount(surface, move || match surface {
+                    SURFACE_PANEL => views::build_panel(&build_app.core()),
+                    SURFACE_SETTINGS => views::build_settings(&build_app.core()),
+                    _ => views::build_preview(&build_app.core()),
+                })
+                .await;
+        }
         tokio::spawn(App::render_loop(app.clone(), version_rx));
         tokio::spawn(App::poll_loop(app.clone()));
         tokio::spawn(App::workflow_poll_loop(app.clone()));
@@ -141,11 +183,12 @@ impl App {
         app
     }
 
-    /// 注册贡献点、订阅仓库事件、跑首轮刷新、按设置托管自启。
+    /// 注册贡献点、跑首轮刷新、按设置托管自启。
     pub async fn after_ready(self: &Arc<App>) {
-        let _ = self.ctx.register(ContributionSlot::Panel, SURFACE_PANEL, "ComfyUI 生成", Some("sparkles")).await;
-        let _ = self.ctx.register(ContributionSlot::Settings, SURFACE_SETTINGS, "ComfyUI", Some("server")).await;
-        let _ = self.ctx.subscribe(VAULT_SWITCH).await;
+        // 面外壳内边距归插件自己控制（零外壳 + 根列 12），避免与宿主默认内边距叠加。
+        let pad = Some(PaddingSpec::All(0.0));
+        let _ = self.ctx.register(ContributionSlot::Panel, SURFACE_PANEL, "ComfyUI 生成", Some("sparkles"), pad).await;
+        let _ = self.ctx.register(ContributionSlot::Settings, SURFACE_SETTINGS, "ComfyUI", Some("server"), pad).await;
 
         self.run_poll_cycle().await;
         self.refresh_workflows_cycle().await;
@@ -193,21 +236,46 @@ impl App {
 
     async fn render_loop(app: Arc<App>, mut rx: watch::Receiver<u64>) {
         while rx.changed().await.is_ok() {
-            let (panel, settings, preview) = {
-                let core = app.core();
-                let panel = core.attached.contains(SURFACE_PANEL).then(|| views::build_panel(&core));
-                let settings = core.attached.contains(SURFACE_SETTINGS).then(|| views::build_settings(&core));
-                let preview = core.attached.contains(SURFACE_PREVIEW).then(|| views::build_preview(&core));
-                (panel, settings, preview)
+            let (panel_attached, commands, stick, settings_attached, preview_attached) = {
+                let mut core = app.core();
+                let mut commands = Vec::new();
+                let panel_attached = core.attached.contains(SURFACE_PANEL);
+                if panel_attached {
+                    let flow = gallery::layout(&flow_input(&core));
+                    // 没有任何可点条目时画布只剩一块灰底，不如让界面给出文字说明。
+                    core.session.flow = (!flow.hits.is_empty()).then_some(flow);
+                    if let Some(flow) = &core.session.flow {
+                        commands = flow.commands.clone();
+                    }
+                } else {
+                    core.session.flow = None;
+                }
+                // 贴底标志只在面板挂着时消费：面板关着时轮询也会重算，标志要留到下次打开面板那一轮。
+                let stick = panel_attached && core.session.flow_stick;
+                if panel_attached {
+                    core.session.flow_stick = false;
+                }
+                let settings_attached = core.attached.contains(SURFACE_SETTINGS);
+                let preview_attached = core.attached.contains(SURFACE_PREVIEW);
+                (panel_attached, commands, stick, settings_attached, preview_attached)
             };
-            if let Some(tree) = panel {
-                let _ = app.ctx.submit_view(SURFACE_PANEL, tree).await;
+            if panel_attached {
+                let _ = app.ctx.ui().notify(SURFACE_PANEL).await;
+                // 画布清单必须整发整换：宿主按清单指针判重缓存，图片首帧未就绪也不会自己重画，
+                // 每轮重发同一份才能保证副本落盘后缩略图补上来。
+                if !commands.is_empty() {
+                    let _ = app.ctx.submit_canvas(SURFACE_PANEL, views::ID_FLOW_CANVAS, commands).await;
+                }
+                // 新结果进来就贴底：滚动只能在提交完新树之后发，否则宿主看到的还是上一版的容器。
+                if stick {
+                    let _ = app.ctx.scroll_to(SURFACE_PANEL, views::ID_FLOW, ScrollEdge::End).await;
+                }
             }
-            if let Some(tree) = settings {
-                let _ = app.ctx.submit_view(SURFACE_SETTINGS, tree).await;
+            if settings_attached {
+                let _ = app.ctx.ui().notify(SURFACE_SETTINGS).await;
             }
-            if let Some(tree) = preview {
-                let _ = app.ctx.submit_view(SURFACE_PREVIEW, tree).await;
+            if preview_attached {
+                let _ = app.ctx.ui().notify(SURFACE_PREVIEW).await;
             }
         }
     }
@@ -277,7 +345,11 @@ impl App {
         let mut fresh = { self.core().runtime.take_fresh_results(&history) };
         if !fresh.is_empty() {
             runtime::capture_copies(&mut fresh, &settings, &http, &self.store).await;
-            if self.core().runtime.merge_results(fresh, &self.store) {
+            let merged = self.core().runtime.merge_results(fresh, &self.store);
+            if merged {
+                let mut core = self.core();
+                core.session.flow_stick = core.session.flow_at_bottom;
+                drop(core);
                 self.invalidate();
                 self.schedule_save();
             }
@@ -480,6 +552,14 @@ impl App {
                 self.save_current_workflow().await;
                 return;
             }
+            views::ID_PARAMS_TOGGLE => {
+                {
+                    let mut core = self.core();
+                    core.session.params_open = !core.session.params_open;
+                }
+                self.invalidate();
+                return;
+            }
             _ => {}
         }
 
@@ -489,23 +569,82 @@ impl App {
             }
             return;
         }
-
-        // 结果动作：落库 / 另存为 / 大图预览，键 = 结果 key
-        if let Some(key) = node_id.strip_prefix(P_SAVE) {
-            if matches!(event, ViewEvent::Click) {
-                self.archive_result(key.to_string()).await;
+        // 记录流画布：命中区域就是动作，坐标按上一版提交的布局算
+        if node_id == views::ID_FLOW_CANVAS {
+            if let ViewEvent::Canvas { pointer } = event {
+                self.on_flow_pointer(pointer).await;
             }
             return;
         }
-        if let Some(key) = node_id.strip_prefix(P_SAVE_AS) {
-            if matches!(event, ViewEvent::Click) {
-                self.save_result_as(key.to_string()).await;
+        // 记录流滚动位置：只记住「是否停在末端」，决定新结果要不要把视口拉到底；不触发重绘
+        if node_id == views::ID_FLOW {
+            if let ViewEvent::Scroll { offset, max_offset } = event {
+                self.core().session.flow_at_bottom = offset >= max_offset - 1.0;
             }
             return;
         }
-        if let Some(key) = node_id.strip_prefix(P_PREVIEW) {
+        // 尺寸三段与快捷数值：段落 id 定位、事件值定位选项，写回值由 SizePlan 回查
+        if node_id == views::ID_RATIO || node_id == views::ID_RESOLUTION || node_id == views::ID_COUNT {
+            if let ViewEvent::Change { value: EventValue::Number(index) } = event {
+                self.apply_size_option(&node_id, index.max(0.0) as usize);
+            }
+            return;
+        }
+        if let Some((input, _)) = views::QUICK_NUMBER_FIELDS.iter().find(|(_, id)| *id == node_id) {
+            if let ViewEvent::Change { value } = event {
+                let input = *input;
+                self.write_quick_number(input, number_value(&value));
+            }
+            return;
+        }
+        // 主提示词：输入框写字段值，菜单切字段来源
+        if node_id == views::ID_PROMPT_TEXT {
+            if let ViewEvent::Change { value } = event {
+                self.write_prompt_text(text_value(&value));
+            }
+            return;
+        }
+        if node_id == views::ID_PROMPT_FIELD {
+            if let ViewEvent::Change { value: EventValue::Text(action) } = event {
+                {
+                    let mut core = self.core();
+                    core.session.prompt_key = if action.is_empty() { None } else { Some(action.clone()) };
+                }
+                self.invalidate();
+            }
+            return;
+        }
+        if node_id == views::ID_PARAM_FILTER {
+            if let ViewEvent::Change { value } = event {
+                {
+                    let mut core = self.core();
+                    core.session.param_filter = text_value(&value).as_str().unwrap_or("").to_string();
+                }
+                self.invalidate();
+            }
+            return;
+        }
+        // 节点分组折叠：只记覆盖项，未记的按「有没有常用参数」决定；判定口径与视图侧同一（含筛选）
+        if let Some(node_id) = node_id.strip_prefix(P_GROUP) {
             if matches!(event, ViewEvent::Click) {
-                self.open_preview(key.to_string()).await;
+                let mut core = self.core();
+                let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+                let group = form::group_by_node(&form::filter_fields(&fields, &core.session.param_filter))
+                    .into_iter()
+                    .find(|group| group.node_id == node_id)
+                    .map(|group| group.has_common);
+                let open = core.session.group_toggles.get(node_id).copied().unwrap_or(group.unwrap_or(true));
+                core.session.group_toggles.insert(node_id.to_string(), !open);
+                drop(core);
+                self.invalidate();
+            }
+            return;
+        }
+        // 参考图槽位：从 input 目录已有图里选一个写进字段
+        if let Some(key) = node_id.strip_prefix(P_REF_PICK) {
+            if let ViewEvent::Change { value: EventValue::Text(name) } = event {
+                self.write_field_value(key, Value::String(name.clone()));
+                self.capture_ref_thumbs().await;
             }
             return;
         }
@@ -554,6 +693,73 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// 画布命中 → 动作：整格开大图，章位落库/另存/复制提示词，「显示更早」加一批，中断走同一入口。
+    async fn on_flow_pointer(self: &Arc<App>, pointer: CanvasPointer) {
+        let (x, y, button) = match pointer {
+            CanvasPointer::Up { x, y, button } => (x, y, button),
+            _ => return,
+        };
+        if button != MouseButton::Left {
+            return;
+        }
+        let hit = {
+            let core = self.core();
+            core.session.flow.as_ref().and_then(|flow| gallery::hit_test(flow, x, y).map(str::to_string))
+        };
+        let Some(hit) = hit else { return };
+        if let Some(key) = hit.strip_prefix(gallery::HIT_PREVIEW) {
+            self.open_preview(key.to_string()).await;
+        } else if let Some(key) = hit.strip_prefix(gallery::HIT_SAVE) {
+            self.archive_result(key.to_string()).await;
+        } else if let Some(key) = hit.strip_prefix(gallery::HIT_SAVE_AS) {
+            self.save_result_as(key.to_string()).await;
+        } else if let Some(id) = hit.strip_prefix(gallery::HIT_COPY) {
+            self.copy_prompt(id).await;
+        } else if hit == gallery::HIT_MORE {
+            self.core().session.shown_batches += FLOW_BATCH_STEP;
+            self.invalidate();
+        } else if hit == gallery::HIT_INTERRUPT {
+            self.interrupt().await;
+        }
+    }
+
+    /// 复制该批次的提示词原文：记录流里不铺开长文本，要看原文交宿主剪贴板写面。
+    async fn copy_prompt(self: &Arc<App>, prompt_id: &str) {
+        let text = {
+            let core = self.core();
+            core.runtime.snap.results.iter()
+                .find(|item| item.prompt_id == prompt_id && !item.prompt_text.is_empty())
+                .map(|item| item.prompt_text.clone())
+        };
+        match text {
+            Some(text) => match self.ctx.clipboard_write(&text).await {
+                Ok(()) => self.set_notice("已复制提示词".to_string()),
+                Err(err) => self.set_error(format!("复制失败：{err}")),
+            },
+            None => self.set_error("这条记录没有提示词原文".to_string()),
+        }
+    }
+
+    /// 画布宽度回报：布局坐标与命中都按它对齐。高度不参与比较——记录流高度是宽度的函数，
+    /// 比高度会在「重排→变高→再回报」之间来回抖动。
+    pub fn on_canvas_resized(self: &Arc<App>, params: CanvasResizedParams) {
+        if params.surface_id != SURFACE_PANEL || params.node_id != views::ID_FLOW_CANVAS {
+            return;
+        }
+        let changed = {
+            let mut core = self.core();
+            if (core.session.gallery_width - params.width).abs() < 0.5 {
+                false
+            } else {
+                core.session.gallery_width = params.width;
+                true
+            }
+        };
+        if changed {
+            self.invalidate();
         }
     }
 
@@ -659,6 +865,113 @@ impl App {
         self.invalidate();
     }
 
+    /// 尺寸三段的一个选项：由 `SizePlan` 回查该选项要写的字段逐条落进草稿——比例与分辨率
+    /// 在兜底路径下会一次换算出宽高两个值，界面只给一次点击。
+    fn apply_size_option(self: &Arc<App>, control_id: &str, index: usize) {
+        let section = match control_id {
+            views::ID_RATIO => sizing::SECTION_RATIO,
+            views::ID_RESOLUTION => sizing::SECTION_RESOLUTION,
+            views::ID_COUNT => sizing::SECTION_COUNT,
+            _ => return,
+        };
+        let writes = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            sizing::plan(&core.session.draft, &fields)
+                .writes_of(section, index)
+                .map(|items| items.to_vec())
+                .unwrap_or_default()
+        };
+        if writes.is_empty() {
+            return;
+        }
+        {
+            let mut core = self.core();
+            for write in writes {
+                form::write_field(&mut core.session.draft, &write.node_id, &write.input, write.value);
+            }
+        }
+        self.invalidate();
+    }
+
+    /// 步数/CFG 快捷框：写第一个未连线的同名字段，与高级表单里的是同一个位置。
+    fn write_quick_number(self: &Arc<App>, input: &str, raw: Value) {
+        let target = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            sizing::find_unconnected(&fields, input)
+                .map(|field| (field.node_id.clone(), field.input.clone(), form::coerce_field_value(field, &raw)))
+        };
+        let Some((node_id, name, value)) = target else { return };
+        {
+            let mut core = self.core();
+            form::write_field(&mut core.session.draft, &node_id, &name, value);
+        }
+        self.invalidate();
+    }
+
+    /// 主提示词框：写当前定位到的字段（手选优先，未手选按自动推断），与高级表单同一写入通路（含值收敛）。
+    fn write_prompt_text(self: &Arc<App>, raw: Value) {
+        let key = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            form::resolve_prompt_field(&fields, core.session.prompt_key.as_deref()).map(|(field, _)| field.key())
+        };
+        let Some(key) = key else { return };
+        self.write_field_value(&key, raw);
+    }
+
+    /// 参考图缩略：给「已填文件名但本地还没副本」的槽位抓 `/view?type=input` 字节落进 `refs/`。
+    /// 抓不到就留上传按钮占位，不报错——缩略只影响展示，提交用的仍是服务端里的原文件。
+    async fn capture_ref_thumbs(self: &Arc<App>) {
+        let (settings, http) = self.io_ctx();
+        let missing: Vec<String> = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            form::ref_slots(&fields)
+                .into_iter()
+                .filter_map(|slot| {
+                    let name = form::read_field(&core.session.draft, slot)
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    (!name.is_empty() && core.session.refs.get(&name).is_none()).then_some(name)
+                })
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        let mut failed: Vec<String> = Vec::new();
+        for name in missing {
+            let image_ref = ImageRef { filename: name.clone(), subfolder: String::new(), type_: "input".to_string() };
+            let fetched = match runtime::fetch_image_bytes(&settings, &http, &image_ref).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    failed.push(name);
+                    continue;
+                }
+            };
+            let relative = ref_path(&ref_copy_name(&name));
+            if self.store.save(&relative, &fetched).is_err() {
+                failed.push(name);
+                continue;
+            }
+            let stale = self.core().session.refs.put(&name, relative);
+            for old in stale {
+                self.store.remove(&old);
+            }
+            changed = true;
+        }
+        if !failed.is_empty() {
+            // 缩略只是省事显示，抓不到就留一行可定位原因，不当成失败中止
+            self.set_notice(format!("参考图缩略抓取失败 {} 张：{}", failed.len(), failed.join("、")));
+        }
+        if changed || !failed.is_empty() {
+            self.invalidate();
+        }
+    }
+
     /// 载入下拉选中项：读文件并归一化成可提交 prompt，草稿与随机字段重置。
     async fn select_workflow(self: &Arc<App>, index: i64) {
         let file = {
@@ -678,8 +991,13 @@ impl App {
                     core.session.seed_mode = form::default_seed_keys(&core.session.draft);
                     core.session.current_changed = false;
                     core.session.notice.clear();
+                    core.session.params_open = false;
+                    core.session.param_filter.clear();
+                    core.session.group_toggles.clear();
+                    core.session.prompt_key = None;
                 }
                 self.invalidate();
+                self.capture_ref_thumbs().await;
             }
             Err(err) => self.set_error(err),
         }
@@ -760,17 +1078,12 @@ impl App {
         }
     }
 
-    /// 落库：本地副本优先读字节，缺则回源；写进当前仓库落库目录，成功后记录相对路径。
+    /// 落库：本地副本优先读字节，缺则回源；经宿主仓库写面写进落库目录，成功后记录相对路径。
     async fn archive_result(self: &Arc<App>, key: String) {
-        let (settings, http, item, root, folder) = {
+        let (settings, http, item, folder) = {
             let core = self.core();
-            let Some(root) = core.vault_root.clone() else {
-                drop(core);
-                self.set_error("协作空间不支持保存，请切换到本地仓库".to_string());
-                return;
-            };
             match core.runtime.snap.results.iter().find(|r| r.key == key).cloned() {
-                Some(item) => (core.settings.clone(), self.http.clone(), item, root, core.settings.archive_folder.clone()),
+                Some(item) => (core.settings.clone(), self.http.clone(), item, core.settings.archive_folder.clone()),
                 None => return,
             }
         };
@@ -781,7 +1094,7 @@ impl App {
                 return;
             }
         };
-        match crate::archive::save_to_repo(&root, &folder, &item.image_ref, &bytes) {
+        match crate::archive::save(&self.ctx, &folder, &item.image_ref, &bytes).await {
             Ok(relative) => {
                 self.core().runtime.mark_saved(&key, relative.clone());
                 self.invalidate();
@@ -889,9 +1202,9 @@ impl App {
         self.upload_bytes(&key, &filename, bytes).await;
     }
 
-    /// 粘贴参考图：剪贴板由本进程直读（宿主 `clipboard` 能力面只给文本），取到的位图转 PNG 后上传。
+    /// 粘贴参考图：宿主剪贴板面直接给 PNG 字节，取到后上传。
     async fn paste_reference(self: &Arc<App>, key: String) {
-        match crate::clipboard::read_png_bytes().await {
+        match crate::clipboard::read_png_bytes(&self.ctx).await {
             Ok(bytes) => {
                 let filename = crate::clipboard::file_name();
                 self.upload_bytes(&key, &filename, bytes).await;
@@ -906,7 +1219,12 @@ impl App {
         match runtime::fetch_upload(&settings, &http, filename, bytes).await {
             Ok(image_ref) => {
                 self.set_notice(format!("已上传：{}", image_ref.filename));
-                self.write_field_value(key, Value::String(image_ref.filename));
+                self.write_field_value(key, Value::String(image_ref.filename.clone()));
+                // 服务端同名覆盖后旧缩略已失真：先作废这一条，再按新字节重抓
+                if let Some(old) = self.core().session.refs.remove(&image_ref.filename) {
+                    self.store.remove(&old);
+                }
+                self.capture_ref_thumbs().await;
             }
             Err(err) => self.set_error(err),
         }
@@ -936,29 +1254,19 @@ impl App {
         if !known {
             return;
         }
+        let panel = params.surface_id == SURFACE_PANEL;
         self.core().attached.insert(params.surface_id);
+        if panel {
+            // 挂上来就当用户在看最新一屏：首帧贴底，之后新结果才继续拉底。
+            let mut core = self.core();
+            core.session.flow_at_bottom = true;
+            core.session.flow_stick = true;
+        }
         self.invalidate();
     }
 
     pub fn on_surface_detached(self: &Arc<App>, params: SurfaceDetachedParams) {
         self.core().attached.remove(&params.surface_id);
-    }
-
-    pub fn on_host_event(self: &Arc<App>, params: PublishParams) {
-        if params.name != VAULT_SWITCH {
-            return;
-        }
-        let (root, kind) = match serde_json::from_value::<VaultSwitchPayload>(params.payload) {
-            Ok(VaultSwitchPayload::Local { root }) => (Some(root), VaultKind::Local),
-            Ok(VaultSwitchPayload::Space { .. }) => (None, VaultKind::Space),
-            Err(_) => return, // 形态未知：保留现状，不误禁落库
-        };
-        {
-            let mut core = self.core();
-            core.vault_root = root;
-            core.runtime.snap.vault_kind = kind;
-        }
-        self.invalidate();
     }
 
     // ---------- 错误/提示落状态 ----------
@@ -990,6 +1298,27 @@ fn open_command(url: &str) -> (&'static str, Vec<&str>) {
         "windows" => ("cmd", vec!["/C", "start", "", url]),
         "macos" => ("open", vec![url]),
         _ => ("xdg-open", vec![url]),
+    }
+}
+
+/// 拼记录流布局输入：画廊聚合后按「已展示批次数」从最新往回裁切，末尾接运行中批次。
+/// 裁切以批次（一个 promptId 的同批产出）为单位，一次点击就多展开一批。
+fn flow_input(core: &Core) -> gallery::FlowInput {
+    let snap = &core.runtime.snap;
+    let records = gallery::records_of(&snap.results);
+    let shown = core.session.shown_batches.max(1);
+    let hidden = records.len().saturating_sub(shown);
+    let running = gallery::running_block(
+        &snap.queue_running,
+        &snap.queue_pending,
+        snap.progress.as_ref().map(|progress| progress.fraction() * 100.0),
+        |prompt| runtime::build_fields_for(prompt, snap),
+    );
+    gallery::FlowInput {
+        width: core.session.gallery_width,
+        records: records.into_iter().skip(hidden).collect(),
+        running,
+        earlier_label: (hidden > 0).then(|| format!("显示更早（{hidden}）")),
     }
 }
 
@@ -1078,10 +1407,25 @@ mod tests {
         assert_eq!(split_prefixed(views::ID_RUN), (None, views::ID_RUN));
     }
 
-    /// 结果动作 id 在 `split_prefixed` 之前分派，前缀不得与字段控件前缀互相吞并。
+    /// 画布命中 id 在 `split_prefixed` 之前分派，前缀不得与字段控件前缀互相吞并。
     #[test]
-    fn result_action_ids_are_not_field_prefixes() {
-        for id in [format!("{P_SAVE}k"), format!("{P_SAVE_AS}k"), format!("{P_PREVIEW}k")] {
+    fn canvas_hit_ids_are_not_field_prefixes() {
+        for id in [
+            format!("{}k", gallery::HIT_PREVIEW),
+            format!("{}k", gallery::HIT_SAVE),
+            format!("{}k", gallery::HIT_SAVE_AS),
+            format!("{}k", gallery::HIT_COPY),
+            gallery::HIT_MORE.to_string(),
+            gallery::HIT_INTERRUPT.to_string(),
+        ] {
+            assert_eq!(split_prefixed(&id), (None, id.as_str()), "{id} 不该命中字段控件前缀");
+        }
+    }
+
+    /// 生成坞控件 id 同样先于字段前缀分派：`g:`/`rpick:` 不得被字段前缀吞掉。
+    #[test]
+    fn dock_ids_are_not_field_prefixes() {
+        for id in [format!("{P_GROUP}3.width"), format!("{P_REF_PICK}3.image")] {
             assert_eq!(split_prefixed(&id), (None, id.as_str()), "{id} 不该命中字段控件前缀");
         }
     }
