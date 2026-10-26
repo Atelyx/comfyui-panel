@@ -26,8 +26,10 @@ use crate::history::{ref_copy_name, ref_path, CopyStore, RefCache, ResultImage, 
 use crate::runtime::{self, Channel, Runtime};
 use crate::settings::{base_url, ComfySettings, ProcessMode};
 use crate::views::{
-    self, P_BOOL, P_CLEAR, P_COMBO, P_GROUP, P_NUM, P_PASTE, P_REF_PICK, P_SEED, P_TEXT, P_UPLOAD,
+    self, P_BOOL, P_CLEAR, P_COMBO, P_GROUP, P_NUM, P_PASTE, P_PICK, P_REF_PICK, P_SEED, P_TEXT,
+    P_UPLOAD,
 };
+use crate::workflow::files;
 use crate::workflow::form;
 use crate::workflow::sizing;
 
@@ -53,8 +55,34 @@ const FLOW_BATCH_INIT: usize = 8;
 /// 「显示更早」每次追加的批次数。
 const FLOW_BATCH_STEP: usize = 8;
 
+/// 选择浮层的一个候选：标签、是否当前值、选中后执行的动作。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickerOption {
+    pub label: String,
+    pub current: bool,
+    pub action: PickerAction,
+}
+
+/// 选择浮层的动作：携带稳定的目标标识（路径 / 键 / 值），执行时按当前状态回查，避免下标漂移。
+#[derive(Clone, Debug, PartialEq)]
+pub enum PickerAction {
+    Workflow(String),
+    Size { section: &'static str, value: String },
+    PromptAuto,
+    PromptField(String),
+    RefImage { key: String, name: String },
+    Combo { key: String, submit: String },
+}
+
+/// 面内选择浮层的当前内容。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picker {
+    pub title: String,
+    pub options: Vec<PickerOption>,
+}
+
 /// 界面之外的会话态：当前工作流、参数草稿、随机种子勾选、记录流与生成坞的展开态、参考图缩略、
-/// 预览窗口条目。不落盘。
+/// 灯箱与悬停、选择浮层。不落盘。
 #[derive(Default)]
 pub struct Session {
     pub workflow_id: Option<String>,
@@ -66,6 +94,12 @@ pub struct Session {
     pub notice: String,
     /// 记录流灯箱当前展示的结果 key（面内浮层，见 views::build_lightbox）。
     pub lightbox_key: Option<String>,
+    /// 灯箱右键菜单是否展开。
+    pub lightbox_menu: bool,
+    /// 记录流当前悬停的图格 key：只有它显示文件名与保存动作。
+    pub gallery_hover: Option<String>,
+    /// 面内选择浮层：工作流、尺寸三段、提示词来源、参考图与字段下拉共用。
+    pub picker: Option<Picker>,
     /// 记录流画布宽度：宿主 `canvas.resized` 回报的真实分配宽度，布局坐标与命中都按它算。
     pub gallery_width: f32,
     /// 上一次提交的记录流布局：指针命中按它算，用户点的就是他刚看到的那一版。
@@ -242,6 +276,7 @@ impl App {
                             .any(|item| &item.key == key && item.local.is_some());
                         if gone {
                             core.session.lightbox_key = None;
+                            core.session.lightbox_menu = false;
                         }
                     }
                     let flow = gallery::layout(&flow_input(&core));
@@ -583,13 +618,30 @@ impl App {
                 self.invalidate();
                 return;
             }
-            views::ID_LB_CLOSE => {
-                self.core().session.lightbox_key = None;
-                self.invalidate();
+            views::ID_LB_COPY_PROMPT => {
+                let prompt_id = {
+                    let core = self.core();
+                    core.session.lightbox_key.as_deref().and_then(|key| {
+                        core.runtime.snap.results.iter().find(|item| item.key == key).map(|item| item.prompt_id.clone())
+                    })
+                };
+                self.close_lightbox_menu();
+                if let Some(prompt_id) = prompt_id {
+                    self.copy_prompt(&prompt_id).await;
+                }
                 return;
             }
-            views::ID_LB_SAVE => {
+            views::ID_LB_COPY_IMAGE => {
                 let key = self.core().session.lightbox_key.clone();
+                self.close_lightbox_menu();
+                if let Some(key) = key {
+                    self.copy_result_image(key).await;
+                }
+                return;
+            }
+            views::ID_LB_ARCHIVE => {
+                let key = self.core().session.lightbox_key.clone();
+                self.close_lightbox_menu();
                 if let Some(key) = key {
                     self.archive_result(key).await;
                 }
@@ -597,20 +649,33 @@ impl App {
             }
             views::ID_LB_SAVE_AS => {
                 let key = self.core().session.lightbox_key.clone();
+                self.close_lightbox_menu();
                 if let Some(key) = key {
                     self.save_result_as(key).await;
                 }
                 return;
             }
-            views::ID_LB_COPY => {
-                let prompt_id = {
-                    let core = self.core();
-                    core.session.lightbox_key.as_deref().and_then(|key| {
-                        core.runtime.snap.results.iter().find(|item| item.key == key).map(|item| item.prompt_id.clone())
-                    })
-                };
-                if let Some(prompt_id) = prompt_id {
-                    self.copy_prompt(&prompt_id).await;
+            views::ID_LB_HEAD | views::ID_LB_CARD => {
+                if matches!(event, ViewEvent::Click) {
+                    self.close_lightbox();
+                }
+                return;
+            }
+            views::ID_LB_MENU => {
+                if matches!(event, ViewEvent::Click) {
+                    self.close_lightbox_menu();
+                }
+                return;
+            }
+            views::ID_LB_IMAGE => {
+                match event {
+                    // 菜单展开时点图收起菜单，否则点图不关灯箱（关灯箱靠图外空白）
+                    ViewEvent::Click => self.close_lightbox_menu(),
+                    ViewEvent::SecondaryClick => {
+                        self.core().session.lightbox_menu = true;
+                        self.invalidate();
+                    }
+                    _ => {}
                 }
                 return;
             }
@@ -618,13 +683,19 @@ impl App {
         }
 
         // 浮层遮罩：点遮罩（内容之外）由宿主回发浮层节点点击，据此收起
-        if node_id == views::ID_PARAMS_OVERLAY || node_id == views::ID_LIGHTBOX {
+        if node_id == views::ID_PARAMS_OVERLAY
+            || node_id == views::ID_LIGHTBOX
+            || node_id == views::ID_PICKER_OVERLAY
+        {
             if matches!(event, ViewEvent::Click) {
                 let mut core = self.core();
-                if node_id == views::ID_PARAMS_OVERLAY {
-                    core.session.params_open = false;
-                } else {
-                    core.session.lightbox_key = None;
+                match node_id.as_str() {
+                    views::ID_PARAMS_OVERLAY => core.session.params_open = false,
+                    views::ID_LIGHTBOX => {
+                        core.session.lightbox_key = None;
+                        core.session.lightbox_menu = false;
+                    }
+                    _ => core.session.picker = None,
                 }
                 drop(core);
                 self.invalidate();
@@ -632,9 +703,33 @@ impl App {
             return;
         }
 
+        // 静态动作按钮之外的选择浮层控件
+        if node_id == views::ID_PICKER_CLOSE {
+            if matches!(event, ViewEvent::Click) {
+                self.core().session.picker = None;
+                self.invalidate();
+            }
+            return;
+        }
+        if let Some(index) = node_id.strip_prefix(P_PICK) {
+            if matches!(event, ViewEvent::Click) {
+                let action = {
+                    let mut core = self.core();
+                    let picker = core.session.picker.take();
+                    picker
+                        .and_then(|picker| index.parse::<usize>().ok().and_then(|index| picker.options.get(index).map(|option| option.action.clone())))
+                };
+                self.invalidate();
+                if let Some(action) = action {
+                    self.apply_picker_action(action).await;
+                }
+            }
+            return;
+        }
+
         if node_id == views::ID_WF {
-            if let ViewEvent::Change { value: EventValue::Number(index) } = event {
-                self.select_workflow(index as i64).await;
+            if matches!(event, ViewEvent::Click) {
+                self.open_workflow_picker();
             }
             return;
         }
@@ -652,10 +747,10 @@ impl App {
             }
             return;
         }
-        // 尺寸三段与快捷数值：段落 id 定位、事件值定位选项，写回值由 SizePlan 回查
+        // 尺寸三段：点选择器开浮层，选项写回值由 SizePlan 回查
         if node_id == views::ID_RATIO || node_id == views::ID_RESOLUTION || node_id == views::ID_COUNT {
-            if let ViewEvent::Change { value: EventValue::Number(index) } = event {
-                self.apply_size_option(&node_id, index.max(0.0) as usize);
+            if matches!(event, ViewEvent::Click) {
+                self.open_size_picker(&node_id);
             }
             return;
         }
@@ -674,12 +769,8 @@ impl App {
             return;
         }
         if node_id == views::ID_PROMPT_FIELD {
-            if let ViewEvent::Change { value: EventValue::Text(action) } = event {
-                {
-                    let mut core = self.core();
-                    core.session.prompt_key = if action.is_empty() { None } else { Some(action.clone()) };
-                }
-                self.invalidate();
+            if matches!(event, ViewEvent::Click) {
+                self.open_prompt_picker();
             }
             return;
         }
@@ -711,9 +802,8 @@ impl App {
         }
         // 参考图槽位：从 input 目录已有图里选一个写进字段
         if let Some(key) = node_id.strip_prefix(P_REF_PICK) {
-            if let ViewEvent::Change { value: EventValue::Text(name) } = event {
-                self.write_field_value(key, Value::String(name.clone()));
-                self.capture_ref_thumbs().await;
+            if matches!(event, ViewEvent::Click) {
+                self.open_ref_picker(key);
             }
             return;
         }
@@ -722,8 +812,8 @@ impl App {
         let (prefix, payload) = split_prefixed(&node_id);
         match prefix {
             Some(P_COMBO) => {
-                if let ViewEvent::Change { value: EventValue::Number(index) } = event {
-                    self.write_combo(payload, index as usize);
+                if matches!(event, ViewEvent::Click) {
+                    self.open_combo_picker(payload);
                 }
             }
             Some(P_NUM) => {
@@ -765,27 +855,57 @@ impl App {
         }
     }
 
-    /// 画布命中 → 动作：整格开大图，章位落库/另存/复制提示词，「显示更早」加一批，中断走同一入口。
+    /// 画布指针：移动只更新悬停图格（浮出保存条），抬起按命中分派动作。
     async fn on_flow_pointer(self: &Arc<App>, pointer: CanvasPointer) {
-        let (x, y, button) = match pointer {
-            CanvasPointer::Up { x, y, button } => (x, y, button),
-            _ => return,
-        };
-        if button != MouseButton::Left {
-            return;
-        }
-        let hit = {
-            let core = self.core();
-            core.session.flow.as_ref().and_then(|flow| gallery::hit_test(flow, x, y).map(str::to_string))
-        };
-        let Some(hit) = hit else { return };
-        if let Some(key) = hit.strip_prefix(gallery::HIT_PREVIEW) {
-            self.open_lightbox(key.to_string()).await;
-        } else if hit == gallery::HIT_MORE {
-            self.core().session.shown_batches += FLOW_BATCH_STEP;
-            self.invalidate();
-        } else if hit == gallery::HIT_INTERRUPT {
-            self.interrupt().await;
+        match pointer {
+            CanvasPointer::Move { x, y } => {
+                let hover = {
+                    let core = self.core();
+                    core.session.flow.as_ref().and_then(|flow| gallery::hit_test(flow, x, y)).and_then(gallery::cell_key).map(str::to_string)
+                };
+                let changed = {
+                    let mut core = self.core();
+                    if core.session.gallery_hover != hover {
+                        core.session.gallery_hover = hover;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if changed {
+                    self.invalidate();
+                }
+            }
+            CanvasPointer::Leave => {
+                if self.core().session.gallery_hover.take().is_some() {
+                    self.invalidate();
+                }
+            }
+            CanvasPointer::Up { x, y, button } => {
+                if button != MouseButton::Left {
+                    return;
+                }
+                let hit = {
+                    let core = self.core();
+                    core.session.flow.as_ref().and_then(|flow| gallery::hit_test(flow, x, y).map(str::to_string))
+                };
+                let Some(hit) = hit else { return };
+                if let Some(key) = hit.strip_prefix(gallery::HIT_PREVIEW) {
+                    self.open_lightbox(key.to_string()).await;
+                } else if let Some(key) = hit.strip_prefix(gallery::HIT_SAVE) {
+                    self.archive_result(key.to_string()).await;
+                } else if let Some(prompt_id) = hit.strip_prefix(gallery::HIT_COPY) {
+                    self.copy_prompt(prompt_id).await;
+                } else if hit == gallery::HIT_COPY_RUN {
+                    self.copy_running_prompt().await;
+                } else if hit == gallery::HIT_MORE {
+                    self.core().session.shown_batches += FLOW_BATCH_STEP;
+                    self.invalidate();
+                } else if hit == gallery::HIT_INTERRUPT {
+                    self.interrupt().await;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -806,6 +926,76 @@ impl App {
         }
     }
 
+    /// 复制运行中批次的提示词：记录流顶部的复制小章只认队首任务。
+    async fn copy_running_prompt(self: &Arc<App>) {
+        let (text, queued) = {
+            let core = self.core();
+            let lead = core.runtime
+                .snap
+                .queue_running
+                .first()
+                .or(core.runtime.snap.queue_pending.first());
+            let text = lead
+                .and_then(crate::comfy::types::queue_item_prompt)
+                .map(form::prompt_text_of)
+                .filter(|text| !text.is_empty());
+            (text, lead.is_some())
+        };
+        match text {
+            Some(text) => match self.ctx.clipboard_write(&text).await {
+                Ok(()) => self.set_notice("已复制提示词".to_string()),
+                Err(err) => self.set_error(format!("复制失败：{err}")),
+            },
+            None if queued => self.set_error("当前任务没有提示词原文".to_string()),
+            None => self.set_error("队列里没有可复制的任务".to_string()),
+        }
+    }
+
+    /// 复制结果图到剪贴板：宿主只收 PNG，非 PNG 给可读原因而不是让宿主解码失败。
+    async fn copy_result_image(self: &Arc<App>, key: String) {
+        let (settings, http, item) = {
+            let core = self.core();
+            match core.runtime.snap.results.iter().find(|item| item.key == key).cloned() {
+                Some(item) => (core.settings.clone(), self.http.clone(), item),
+                None => return,
+            }
+        };
+        let bytes = match read_result_bytes(&self.store, &settings, &http, &item).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        if !crate::clipboard::is_png(&bytes) {
+            self.set_error("结果图不是 PNG 格式，无法复制到剪贴板".to_string());
+            return;
+        }
+        match self.ctx.clipboard_write_image(&bytes).await {
+            Ok(()) => self.set_notice("已复制图片".to_string()),
+            Err(err) => self.set_error(format!("复制图片失败：{err}")),
+        }
+    }
+
+    fn close_lightbox(self: &Arc<App>) {
+        {
+            let mut core = self.core();
+            core.session.lightbox_key = None;
+            core.session.lightbox_menu = false;
+        }
+        self.invalidate();
+    }
+
+    fn close_lightbox_menu(self: &Arc<App>) {
+        let mut core = self.core();
+        if !core.session.lightbox_menu {
+            return;
+        }
+        core.session.lightbox_menu = false;
+        drop(core);
+        self.invalidate();
+    }
+
     /// 画布宽度回报：布局坐标与命中都按它对齐。高度不参与比较——记录流高度是宽度的函数，
     /// 比高度会在「重排→变高→再回报」之间来回抖动。
     pub fn on_canvas_resized(self: &Arc<App>, params: CanvasResizedParams) {
@@ -818,6 +1008,7 @@ impl App {
                 false
             } else {
                 core.session.gallery_width = params.width;
+                core.session.gallery_hover = None;
                 true
             }
         };
@@ -858,7 +1049,31 @@ impl App {
             }
             _ => {}
         }
-        let reconnect = node_id == views::SET_HOST || node_id == views::SET_PORT || node_id == views::SET_MODE;
+        // 进程模式是两个互斥按钮：点哪个就切到哪个，重复点当前值不落盘
+        let mode = match node_id.as_str() {
+            views::SET_MODE_MANAGED => Some(ProcessMode::Managed),
+            views::SET_MODE_EXTERNAL => Some(ProcessMode::External),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            if matches!(event, ViewEvent::Click) {
+                let changed = {
+                    let mut core = self.core();
+                    if core.settings.process_mode == mode {
+                        false
+                    } else {
+                        core.settings.process_mode = mode;
+                        true
+                    }
+                };
+                if changed {
+                    self.invalidate();
+                    self.schedule_save();
+                }
+            }
+            return;
+        }
+        let reconnect = node_id == views::SET_HOST || node_id == views::SET_PORT;
         {
             let mut core = self.core();
             match (node_id.as_str(), &event) {
@@ -870,9 +1085,6 @@ impl App {
                     if let Some(port) = number_value(value).as_f64().map(|n| n.clamp(1.0, 65535.0) as u32).and_then(|n| u16::try_from(n).ok()) {
                         core.settings.port = port;
                     }
-                }
-                (views::SET_MODE, ViewEvent::Change { value: EventValue::Number(index) }) => {
-                    core.settings.process_mode = if *index == 1.0 { ProcessMode::External } else { ProcessMode::Managed };
                 }
                 (views::SET_DIR, ViewEvent::Change { value }) => core.settings.comfy_dir = text_value(value).as_str().unwrap_or("").to_string(),
                 (views::SET_PYTHON, ViewEvent::Change { value }) => core.settings.python_path = text_value(value).as_str().unwrap_or("").to_string(),
@@ -892,6 +1104,165 @@ impl App {
         self.schedule_save();
     }
 
+    // ---------- 选择浮层 ----------
+
+    fn show_picker(self: &Arc<App>, title: &str, options: Vec<PickerOption>) {
+        if options.is_empty() {
+            self.set_notice(format!("{title}：没有可选项"));
+            return;
+        }
+        self.core().session.picker = Some(Picker { title: title.to_string(), options });
+        self.invalidate();
+    }
+
+    fn open_workflow_picker(self: &Arc<App>) {
+        let options = {
+            let core = self.core();
+            let current = core.session.workflow_id.as_deref();
+            core.runtime
+                .snap
+                .workflows
+                .iter()
+                .map(|file| PickerOption {
+                    label: files::workflow_display_name(&file.name),
+                    current: current == Some(file.path.as_str()),
+                    action: PickerAction::Workflow(file.path.clone()),
+                })
+                .collect()
+        };
+        self.show_picker("选择工作流", options);
+    }
+
+    fn open_size_picker(self: &Arc<App>, control_id: &str) {
+        let section_id = match control_id {
+            views::ID_RATIO => sizing::SECTION_RATIO,
+            views::ID_RESOLUTION => sizing::SECTION_RESOLUTION,
+            views::ID_COUNT => sizing::SECTION_COUNT,
+            _ => return,
+        };
+        let picked = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            sizing::plan(&core.session.draft, &fields)
+                .sections
+                .into_iter()
+                .find(|section| section.id == section_id)
+        };
+        let Some(section) = picked else { return };
+        let options = section
+            .options
+            .iter()
+            .map(|option| PickerOption {
+                label: option.label.clone(),
+                current: section.selected.as_deref() == Some(option.value.as_str()),
+                action: PickerAction::Size { section: section.id, value: option.value.clone() },
+            })
+            .collect();
+        self.show_picker(&format!("选择{}", section.label), options);
+    }
+
+    fn open_prompt_picker(self: &Arc<App>) {
+        let options = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            let (field, explicit) = match form::resolve_prompt_field(&fields, core.session.prompt_key.as_deref()) {
+                Some(resolved) => resolved,
+                None => return,
+            };
+            let current_key = field.key();
+            let mut options = vec![PickerOption {
+                label: "自动".to_string(),
+                current: !explicit,
+                action: PickerAction::PromptAuto,
+            }];
+            options.extend(form::prompt_candidates(&fields).into_iter().map(|candidate| PickerOption {
+                label: format!("{}.{}", candidate.node_label, form::field_label(&candidate.input)),
+                current: explicit && candidate.key() == current_key,
+                action: PickerAction::PromptField(candidate.key()),
+            }));
+            options
+        };
+        self.show_picker("选择提示词来源", options);
+    }
+
+    fn open_ref_picker(self: &Arc<App>, key: &str) {
+        let picked = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            form::ref_slots(&fields)
+                .into_iter()
+                .find(|slot| slot.key() == key)
+                .map(|slot| {
+                    let current = form::display_value(form::read_field(&core.session.draft, slot).as_ref());
+                    let names = form::image_candidates(core.runtime.snap.object_info.as_ref(), &slot.class_type);
+                    (slot.class_type.clone(), current, names)
+                })
+        };
+        let Some((_class, current, names)) = picked else { return };
+        let options = names
+            .into_iter()
+            .map(|name| PickerOption {
+                current: name == current,
+                label: name.clone(),
+                action: PickerAction::RefImage { key: key.to_string(), name },
+            })
+            .collect();
+        self.show_picker("选择参考图", options);
+    }
+
+    fn open_combo_picker(self: &Arc<App>, key: &str) {
+        let picked = {
+            let core = self.core();
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            let Some(field) = fields.iter().find(|field| field.key() == key) else { return };
+            let current = form::display_value(form::read_field(&core.session.draft, field).as_ref());
+            let named = form::field_label(&field.input);
+            let title = if named.is_empty() { field.input.clone() } else { named.to_string() };
+            let options = field.options.clone().unwrap_or_default();
+            (title, current, options)
+        };
+        let (title, current, options) = picked;
+        let options = options
+            .into_iter()
+            .map(|(submit, label)| PickerOption {
+                current: submit == current,
+                label,
+                action: PickerAction::Combo { key: key.to_string(), submit },
+            })
+            .collect();
+        self.show_picker(&format!("选择{title}"), options);
+    }
+
+    async fn apply_picker_action(self: &Arc<App>, action: PickerAction) {
+        match action {
+            PickerAction::Workflow(path) => {
+                let exists = {
+                    let core = self.core();
+                    core.runtime.snap.workflows.iter().any(|file| file.path == path)
+                };
+                if !exists {
+                    self.set_error("工作流已不在列表中，刷新后重试".to_string());
+                    return;
+                }
+                self.select_workflow_by_path(&path).await;
+            }
+            PickerAction::Size { section, value } => self.apply_size_option(section, &value),
+            PickerAction::PromptAuto => {
+                self.core().session.prompt_key = None;
+                self.invalidate();
+            }
+            PickerAction::PromptField(key) => {
+                self.core().session.prompt_key = Some(key);
+                self.invalidate();
+            }
+            PickerAction::RefImage { key, name } => {
+                self.write_field_value(&key, Value::String(name));
+                self.capture_ref_thumbs().await;
+            }
+            PickerAction::Combo { key, submit } => self.write_field_value(&key, Value::String(submit)),
+        }
+    }
+
     // ---------- 落库/参考图/工作流动作 ----------
 
     fn write_field_value(self: &Arc<App>, key: &str, raw: Value) {
@@ -899,17 +1270,6 @@ impl App {
         let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
         let Some(field) = fields.into_iter().find(|field| field.key() == key) else { return };
         let value = form::coerce_field_value(&field, &raw);
-        form::write_field(&mut core.session.draft, &field.node_id, &field.input, value);
-        drop(core);
-        self.invalidate();
-    }
-
-    fn write_combo(self: &Arc<App>, key: &str, index: usize) {
-        let mut core = self.core();
-        let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
-        let Some(field) = fields.into_iter().find(|field| field.key() == key) else { return };
-        let Some((submit, _)) = field.options.as_ref().and_then(|options| options.get(index)) else { return };
-        let value = Value::String(submit.clone());
         form::write_field(&mut core.session.draft, &field.node_id, &field.input, value);
         drop(core);
         self.invalidate();
@@ -927,24 +1287,23 @@ impl App {
         self.invalidate();
     }
 
-    /// 尺寸三段的一个选项：由 `SizePlan` 回查该选项要写的字段逐条落进草稿——比例与分辨率
+    /// 尺寸三段的一个选项：按选项值回查当前计划里要写的字段逐条落进草稿——比例与分辨率
     /// 在兜底路径下会一次换算出宽高两个值，界面只给一次点击。
-    fn apply_size_option(self: &Arc<App>, control_id: &str, index: usize) {
-        let section = match control_id {
-            views::ID_RATIO => sizing::SECTION_RATIO,
-            views::ID_RESOLUTION => sizing::SECTION_RESOLUTION,
-            views::ID_COUNT => sizing::SECTION_COUNT,
-            _ => return,
-        };
+    fn apply_size_option(self: &Arc<App>, section: &str, value: &str) {
         let writes = {
             let core = self.core();
             let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
-            sizing::plan(&core.session.draft, &fields)
-                .writes_of(section, index)
+            let plan = sizing::plan(&core.session.draft, &fields);
+            plan.sections
+                .iter()
+                .find(|item| item.id == section)
+                .and_then(|item| item.options.iter().position(|option| option.value == value))
+                .and_then(|index| plan.writes_of(section, index))
                 .map(|items| items.to_vec())
                 .unwrap_or_default()
         };
         if writes.is_empty() {
+            self.set_error("当前工作流没有该尺寸选项".to_string());
             return;
         }
         {
@@ -1237,7 +1596,11 @@ impl App {
             self.set_error("副本未就绪，无法预览".to_string());
             return;
         }
-        self.core().session.lightbox_key = Some(key);
+        {
+            let mut core = self.core();
+            core.session.lightbox_key = Some(key);
+            core.session.lightbox_menu = false;
+        }
         self.invalidate();
     }
 
@@ -1329,7 +1692,12 @@ impl App {
     }
 
     pub fn on_surface_detached(self: &Arc<App>, params: SurfaceDetachedParams) {
-        self.core().attached.remove(&params.surface_id);
+        let mut core = self.core();
+        core.attached.remove(&params.surface_id);
+        if params.surface_id == SURFACE_PANEL {
+            // 卸载收不到 PointerLeave：不清理会让下次挂载时某个格无缘无故浮出悬停条。
+            core.session.gallery_hover = None;
+        }
     }
 
     // ---------- 错误/提示落状态 ----------
@@ -1397,6 +1765,7 @@ fn flow_input(core: &Core) -> gallery::FlowInput {
         records: records.into_iter().skip(hidden).collect(),
         running,
         earlier_label: (hidden > 0).then(|| format!("显示更早（{hidden}）")),
+        hover: core.session.gallery_hover.clone(),
     }
 }
 
@@ -1490,6 +1859,9 @@ mod tests {
     fn canvas_hit_ids_are_not_field_prefixes() {
         for id in [
             format!("{}k", gallery::HIT_PREVIEW),
+            format!("{}k", gallery::HIT_SAVE),
+            format!("{}p1", gallery::HIT_COPY),
+            gallery::HIT_COPY_RUN.to_string(),
             gallery::HIT_MORE.to_string(),
             gallery::HIT_INTERRUPT.to_string(),
         ] {
@@ -1500,7 +1872,11 @@ mod tests {
     /// 生成坞控件 id 同样先于字段前缀分派：`g:`/`rpick:` 不得被字段前缀吞掉。
     #[test]
     fn dock_ids_are_not_field_prefixes() {
-        for id in [format!("{P_GROUP}3.width"), format!("{P_REF_PICK}3.image")] {
+        for id in [
+            format!("{P_GROUP}3.width"),
+            format!("{P_REF_PICK}3.image"),
+            format!("{P_PICK}0"),
+        ] {
             assert_eq!(split_prefixed(&id), (None, id.as_str()), "{id} 不该命中字段控件前缀");
         }
     }

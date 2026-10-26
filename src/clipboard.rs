@@ -23,9 +23,21 @@ pub fn file_name() -> String {
     format!("clipboard-{}.png", chrono::Utc::now().timestamp_millis())
 }
 
+/// 是否 PNG 字节（宿主写剪贴板图片只接受 PNG）：按文件头签名判断，不看扩展名。
+pub fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_signature_is_recognized() {
+        assert!(is_png(b"\x89PNG\r\n\x1a\nrest"));
+        assert!(!is_png(b"\xff\xd8\xff\xe0jpeg"));
+        assert!(!is_png(b"PNG"));
+    }
 
     #[test]
     fn pasted_file_is_png_named_by_timestamp() {
