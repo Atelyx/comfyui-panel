@@ -5,8 +5,8 @@
 
 use atelyx_plugin_sdk::protocol::view::{
     Align, Axis, BoxSize, ButtonVariant, CanvasEventKind, ColorSpec, ColorToken, ControlSize,
-    EventKind, ImageFit, ImageSource, Justify, MenuItem, NodeBody, PaddingSpec, SizeSpec, TextWeight,
-    ViewNode,
+    EventKind, ImageFit, ImageSource, Justify, MenuItem, NodeBody, PaddingSpec, ReportMode, SizeSpec,
+    TextWeight, ViewNode,
 };
 
 use crate::app::Core;
@@ -34,6 +34,9 @@ pub const ID_FLOW: &str = "flow";
 pub const ID_FLOW_CANVAS: &str = "flow_canvas";
 pub const ID_PARAMS_TOGGLE: &str = "params_toggle";
 pub const ID_PARAM_FILTER: &str = "param_filter";
+/// 高级参数浮层的关闭钮与浮层节点本身（点遮罩即点它）。
+pub const ID_PARAMS_CLOSE: &str = "params_close";
+pub const ID_PARAMS_OVERLAY: &str = "params_overlay";
 pub const ID_PROMPT_FIELD: &str = "prompt_field";
 pub const ID_PROMPT_TEXT: &str = "prompt_text";
 pub const ID_RATIO: &str = "size_ratio";
@@ -53,7 +56,6 @@ pub const SET_DIR_PICK: &str = "set_dir_pick";
 pub const SET_PYTHON: &str = "set_python";
 pub const SET_EXTRA: &str = "set_extra";
 pub const SET_ARCHIVE: &str = "set_archive";
-pub const SET_AUTO: &str = "set_auto_start";
 
 // ---------- 动态控件 id 前缀 ----------
 pub const P_COMBO: &str = "c:";
@@ -186,23 +188,23 @@ fn divider(id: &str) -> ViewNode {
 }
 
 fn label(id: &str, text: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Text { content: text.into(), size: None, weight: Some(TextWeight::Medium), color: None, align: None , family: None, wrap: None })
+    node(id, NodeBody::Text { content: text.into(), size: None, weight: Some(TextWeight::Medium), color: None, align: None , family: None, wrap: None, max_lines: None })
 }
 
 fn plain(id: &str, text: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Text { content: text.into(), size: None, weight: None, color: None, align: None , family: None, wrap: None })
+    node(id, NodeBody::Text { content: text.into(), size: None, weight: None, color: None, align: None , family: None, wrap: None, max_lines: None })
 }
 
 fn muted(id: &str, text: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Text { content: text.into(), size: Some(TEXT_SMALL), weight: None, color: Some(ColorSpec::Token(ColorToken::TextMuted)), align: None , family: None, wrap: None })
+    node(id, NodeBody::Text { content: text.into(), size: Some(TEXT_SMALL), weight: None, color: Some(ColorSpec::Token(ColorToken::TextMuted)), align: None , family: None, wrap: None, max_lines: None })
 }
 
 fn warn(id: &str, text: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Text { content: text.into(), size: Some(TEXT_SMALL), weight: None, color: Some(ColorSpec::Token(ColorToken::Warning)), align: None , family: None, wrap: None })
+    node(id, NodeBody::Text { content: text.into(), size: Some(TEXT_SMALL), weight: None, color: Some(ColorSpec::Token(ColorToken::Warning)), align: None , family: None, wrap: None, max_lines: None })
 }
 
 fn danger(id: &str, text: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Text { content: text.into(), size: Some(TEXT_SMALL), weight: None, color: Some(ColorSpec::Token(ColorToken::Danger)), align: None , family: None, wrap: None })
+    node(id, NodeBody::Text { content: text.into(), size: Some(TEXT_SMALL), weight: None, color: Some(ColorSpec::Token(ColorToken::Danger)), align: None , family: None, wrap: None, max_lines: None })
 }
 
 fn button(id: &str, text: impl Into<String>, variant: ButtonVariant, enabled: bool) -> ViewNode {
@@ -231,15 +233,6 @@ fn button_lg(id: &str, text: &str, variant: ButtonVariant, enabled: bool) -> Vie
 
 fn text_input(id: &str, value: String, multiline: bool) -> ViewNode {
     node_events(id, NodeBody::TextInput { value, placeholder: None, multiline: (multiline).then_some(true), password: None, read_only: None, report: None }, vec![EventKind::Change])
-}
-
-/// 带占位文案的单行输入（筛选框这类空态需要自解释）。
-fn text_input_hint(id: &str, value: String, placeholder: &str) -> ViewNode {
-    node_events(
-        id,
-        NodeBody::TextInput { value, placeholder: Some(placeholder.to_string()), multiline: None, password: None, read_only: None, report: None },
-        vec![EventKind::Change],
-    )
 }
 
 fn number_input(id: &str, value: Option<f64>, min: Option<f64>, max: Option<f64>, step: Option<f64>) -> ViewNode {
@@ -312,19 +305,41 @@ fn scroll_horizontal(id: &str, children: Vec<ViewNode>, height: f32) -> ViewNode
 
 // ---------- 生成面板 ----------
 
-/// 面板三段：顶部状态条（固定）→ 中间结果记录流（占满剩余高度、自己滚）→ 底部生成坞（固定）。
+/// 生成坞与浮层卡片的宽度上限：宽面板下内容不横向撑满，居中呈现。
+const DOCK_MAX_W: f32 = 720.0;
+
+/// 面板三段：顶部状态条（固定）→ 中间结果记录流（占满剩余高度、自己滚）→ 底部生成坞（固定宽度居中）。
+/// 高级参数展开为面内浮层（见 [`params_overlay`]），坞内只留开关钮；点结果格开灯箱（见 [`build_lightbox`]）。
 pub fn build_panel(core: &Core) -> ViewNode {
+    let fields = build_fields_for(&core.session.draft, &core.runtime.snap);
     let mut cells = vec![status_bar(core)];
     if let Some(line) = alert_line(core) {
         cells.push(line);
     }
-    if let Some(line) = progress_line(core) {
-        cells.push(line);
-    }
     cells.push(flow_section(core));
     cells.push(divider("divdock"));
-    cells.push(dock(core));
-    col("root", cells)
+    cells.push(dock(core, &fields));
+    if core.session.params_open {
+        cells.push(params_overlay(core, &fields));
+    }
+    if core.session.lightbox_key.is_some() {
+        cells.push(build_lightbox(core));
+    }
+    // 根列交叉轴居中：撑满的段落不受影响，限宽的生成坞在宽面板下居中不贴边。
+    ViewNode {
+        id: "root".to_string(),
+        interaction: None,
+        grow: None,
+        body: NodeBody::Column {
+            gap: Some(8.0),
+            padding: Some(PaddingSpec::All(12.0)),
+            cross_align: Some(Align::Center),
+            align: None,
+            size: None,
+        },
+        children: cells,
+        events: Vec::new(),
+    }
 }
 
 fn status_bar(core: &Core) -> ViewNode {
@@ -357,7 +372,7 @@ fn channel_text(core: &Core) -> ViewNode {
             Channel::Offline => ("未连接".to_string(), ColorToken::TextMuted),
         }
     };
-    node("channel", NodeBody::Text { content, size: None, weight: Some(TextWeight::Medium), color: Some(ColorSpec::Token(color)), align: None, family: None, wrap: None })
+    node("channel", NodeBody::Text { content, size: None, weight: Some(TextWeight::Medium), color: Some(ColorSpec::Token(color)), align: None, family: None, wrap: None, max_lines: None })
 }
 
 /// 队列概览：离线时不占位，在线时让人看清按下去排在谁后面。
@@ -376,7 +391,7 @@ fn alert_line(core: &Core) -> Option<ViewNode> {
         return Some(row_spread(
             "errline",
             vec![
-                node("errtext", NodeBody::Text { content: snap.error.clone(), size: None, weight: None, color: Some(ColorSpec::Token(ColorToken::Danger)), align: None , family: None, wrap: None }),
+                node("errtext", NodeBody::Text { content: snap.error.clone(), size: None, weight: None, color: Some(ColorSpec::Token(ColorToken::Danger)), align: None , family: None, wrap: None, max_lines: None }),
                 button(ID_CLEAR_ERROR, "关闭", ButtonVariant::Ghost, true),
             ],
         ));
@@ -387,17 +402,6 @@ fn alert_line(core: &Core) -> Option<ViewNode> {
     Some(muted("notice", core.session.notice.clone()))
 }
 
-fn progress_line(core: &Core) -> Option<ViewNode> {
-    let progress = core.runtime.snap.progress.as_ref()?;
-    Some(row_fill(
-        "progressrow",
-        vec![
-            node("bar", NodeBody::Progress { value: progress.fraction(), girth: None, tone: None }),
-            muted("step", format!("{:.0}/{}", progress.value, progress.max)),
-        ],
-    ))
-}
-
 /// 中间段：一次算好的记录流画布（高度按内容定，滚动交给外层容器）。
 fn flow_section(core: &Core) -> ViewNode {
     let canvas = match &core.session.flow {
@@ -405,7 +409,7 @@ fn flow_section(core: &Core) -> ViewNode {
             id: ID_FLOW_CANVAS.to_string(),
             interaction: None,
             grow: None,
-            body: NodeBody::Canvas { mouse_events: vec![CanvasEventKind::PointerUp], height: Some(flow.height), fill: None },
+            body: NodeBody::Canvas { mouse_events: vec![CanvasEventKind::PointerUp], height: Some(flow.height), fill: None, fps: None },
             children: Vec::new(),
             events: Vec::new(),
         },
@@ -420,22 +424,26 @@ const REF_THUMB_H: f32 = 72.0;
 const REF_STRIP_H: f32 = 112.0;
 /// 选已有参考图的弹层条目上限（超出只列前若干项）。
 const REF_PICK_LIMIT: usize = 16;
-/// 高级参数展开后的自限高度：再高就会把记录流挤没了。
-const PARAMS_H: f32 = 240.0;
+/// 高级参数展开后的自限高度：浮层不再占记录流的高度，仍给自滚区设上限，避免矮面板上浮层顶出屏幕。
+const PARAMS_H: f32 = 300.0;
 
-fn dock(core: &Core) -> ViewNode {
-    let fields = build_fields_for(&core.session.draft, &core.runtime.snap);
+fn dock(core: &Core, fields: &[FieldSpec]) -> ViewNode {
     let mut cells = vec![workflow_row(core)];
-    if let Some(strip) = ref_strip(core, &fields) {
+    if let Some(strip) = ref_strip(core, fields) {
         cells.push(strip);
     }
-    if let Some(block) = prompt_block(core, &fields) {
+    if let Some(block) = prompt_block(core, fields) {
         cells.push(block);
     }
-    cells.extend(size_rows(core, &fields));
+    cells.extend(size_rows(core, fields));
     cells.push(run_row(core));
-    cells.push(advanced_section(core, &fields));
-    column("dock", cells, 6.0)
+    cells.push(advanced_section(core, fields));
+    let mut node = column("dock", cells, 6.0);
+    // 宽面板不横向撑满：限宽后由根列居中
+    if let NodeBody::Column { size, .. } = &mut node.body {
+        *size = Some(BoxSize { width: Some(SizeSpec::Fill), max_width: Some(DOCK_MAX_W), ..BoxSize::default() });
+    }
+    node
 }
 
 fn workflow_row(core: &Core) -> ViewNode {
@@ -626,20 +634,22 @@ fn snap_has_draft(core: &Core) -> bool {
     core.session.draft.as_object().map(|map| !map.is_empty()).unwrap_or(false)
 }
 
-/// 高级参数：折叠开关在收起态只占一行；展开后筛选框 + 按节点分组，表单区自限高度。
+/// 高级参数开关：收起态只占坞内一行；展开态内容进面内浮层（见 [`params_overlay`]）。
 fn advanced_section(core: &Core, fields: &[FieldSpec]) -> ViewNode {
     let total = form::form_fields(fields).len();
     let toggle_title = if core.session.params_open { "收起高级参数".to_string() } else { format!("高级参数（{total}）") };
-    let head = row_fill(
+    row_fill(
         "paramshead",
         vec![button(ID_PARAMS_TOGGLE, toggle_title, ButtonVariant::Ghost, total > 0)],
-    );
-    if !core.session.params_open {
-        return head;
-    }
+    )
+}
+
+/// 高级参数浮层：面内模态大面板（遮罩拦下指针事件，点遮罩或关闭钮收起）。
+/// 参数区从坞内搬来这里：矮面板下折叠态不再与记录流抢高度，展开态也有稳定的自滚空间。
+fn params_overlay(core: &Core, fields: &[FieldSpec]) -> ViewNode {
     let groups = form::group_by_node(&form::filter_fields(fields, &core.session.param_filter));
     let mut cells: Vec<ViewNode> = Vec::new();
-    for group in groups {
+    for group in &groups {
         let open = core.session.group_toggles.get(group.node_id).copied().unwrap_or(group.has_common);
         let title = if open { format!("▾ {} · {} 项", group.label, group.fields.len()) } else { format!("▸ {}", group.label) };
         cells.push(button(&format!("{P_GROUP}{}", group.node_id), title, ButtonVariant::Ghost, true));
@@ -652,15 +662,51 @@ fn advanced_section(core: &Core, fields: &[FieldSpec]) -> ViewNode {
     if cells.is_empty() {
         cells.push(muted("nofield", "没有匹配的参数"));
     }
-    column(
-        "paramsblock",
-        vec![
-            head,
-            text_input_hint(ID_PARAM_FILTER, core.session.param_filter.clone(), "筛选参数名或节点"),
-            scroll_fixed("paramsscroll", cells, PARAMS_H),
+    let card = ViewNode {
+        id: "ovcard".to_string(),
+        interaction: None,
+        grow: None,
+        body: NodeBody::Card {
+            gap: Some(6.0),
+            padding: Some(PaddingSpec::All(12.0)),
+            accent: None,
+            tone: None,
+            radius: None,
+            bordered: None,
+            align: None,
+            size: Some(BoxSize { width: Some(SizeSpec::Fill), max_width: Some(DOCK_MAX_W), ..BoxSize::default() }),
+        },
+        children: vec![
+            row_spread(
+                "ovhead",
+                vec![plain("ovtitle", "高级参数"), button(ID_PARAMS_CLOSE, "关闭", ButtonVariant::Ghost, true)],
+            ),
+            // 筛选只影响显示：停抖上报，减少连续键入时的整树重建
+            node_events(
+                ID_PARAM_FILTER,
+                NodeBody::TextInput {
+                    value: core.session.param_filter.clone(),
+                    placeholder: Some("筛选参数名或节点".to_string()),
+                    multiline: None,
+                    password: None,
+                    read_only: None,
+                    report: Some(ReportMode::Debounced(200)),
+                },
+                vec![EventKind::Change],
+            ),
+            scroll_fixed("ovscroll", cells, PARAMS_H),
         ],
-        6.0,
-    )
+        events: Vec::new(),
+    };
+    // 浮层自身声明 click：宿主只在点遮罩（内容之外）时回发，据此收起
+    ViewNode {
+        id: ID_PARAMS_OVERLAY.to_string(),
+        interaction: None,
+        grow: None,
+        body: NodeBody::Overlay { scrim: None },
+        children: vec![card],
+        events: vec![EventKind::Click],
+    }
 }
 
 fn field_control(draft: &serde_json::Value, seed_mode: &std::collections::BTreeSet<String>, field: &FieldSpec) -> ViewNode {
@@ -713,27 +759,96 @@ fn input_label(field: &FieldSpec) -> String {
     }
 }
 
-// ---------- 大图预览窗口 ----------
+// ---------- 记录流灯箱 ----------
 
-/// 预览窗口面树：标题 + 铺满剩余高度的滚动区（图按自然尺寸呈现，超出窗口尺寸时可滚）。
-/// 关闭窗口交给系统标题栏；面树本身无交互控件。
-pub fn build_preview(core: &Core) -> ViewNode {
+// 静态节点 id（灯箱浮层）。
+pub const ID_LIGHTBOX: &str = "lightbox";
+pub const ID_LB_CLOSE: &str = "lb_close";
+pub const ID_LB_SAVE: &str = "lb_save";
+pub const ID_LB_SAVE_AS: &str = "lb_save_as";
+pub const ID_LB_COPY: &str = "lb_copy";
+
+/// 记录流灯箱：面内浮层大图（遮罩点击收起），与表格编辑器图片字段同一种交互——
+/// 点格看大图，存档 / 另存 / 复制提示词都在浮层里。条目被淘汰或副本丢失时由 app 收起。
+pub fn build_lightbox(core: &Core) -> ViewNode {
     let item = core
         .session
-        .preview_key
+        .lightbox_key
         .as_deref()
         .and_then(|key| core.runtime.snap.results.iter().find(|r| r.key == key));
-    let title = match item {
-        Some(entry) if !entry.title.is_empty() => entry.title.clone(),
-        Some(_) => "未命名任务".to_string(),
-        None => "结果预览".to_string(),
+    let head = match item {
+        Some(entry) => {
+            let title = if entry.title.is_empty() { "未命名任务".to_string() } else { entry.title.clone() };
+            let name = entry.image_ref.filename.clone();
+            column(
+                "lbtext",
+                vec![
+                    label("lbtitle", title),
+                    muted("lbfile", name),
+                ],
+                2.0,
+            )
+        }
+        // 条目已不在记录流（理论上 app 会先收起）：给可读说明，不留空白浮层。
+        None => column("lbtext", vec![label("lbtitle", "结果预览"), muted("lbgone", "该结果已不在记录流中")], 2.0),
+    };
+    let actions = match item {
+        Some(entry) => row(
+            "lbactions",
+            vec![
+                node_events(
+                    ID_LB_COPY,
+                    NodeBody::Button { label: "复制提示词".into(), icon: None, variant: Some(ButtonVariant::Ghost), enabled: Some(!entry.prompt_text.is_empty()), size: None },
+                    vec![EventKind::Click],
+                ),
+                button(ID_LB_SAVE, if entry.saved_path.is_some() { "已存".to_string() } else { "存到仓库".to_string() }, ButtonVariant::Ghost, entry.saved_path.is_none()),
+                button(ID_LB_SAVE_AS, "另存为", ButtonVariant::Ghost, true),
+                button(ID_LB_CLOSE, "关闭", ButtonVariant::Primary, true),
+            ],
+        ),
+        None => row("lbactions", vec![button(ID_LB_CLOSE, "关闭", ButtonVariant::Primary, true)]),
     };
     let body = match item.and_then(ResultImage::display_source) {
-        Some(path) => scroll("pvwscroll", vec![node("pvwimage", NodeBody::Image { source: ImageSource::Private { path }, fit: Some(ImageFit::Contain), width: None, height: None })]),
-        // 条目可能因历史淘汰而消失：给可读说明，不留空白面。
-        None => col("pvwempty", vec![muted("pvwhint", "该结果已不在记录流中")]),
+        Some(path) => ViewNode {
+            id: "lbimage".to_string(),
+            interaction: None,
+            // 吃掉标题行与动作行之外的剩余高度，图按 contain 完整呈现
+            grow: Some(1),
+            body: NodeBody::Image { source: ImageSource::Private { path }, fit: Some(ImageFit::Contain), width: Some(SizeSpec::Fill), height: Some(SizeSpec::Fill) },
+            children: Vec::new(),
+            events: Vec::new(),
+        },
+        None => column("lbempty", vec![muted("lbhint", "副本未就绪")], 0.0),
     };
-    col("pvwroot", vec![label("pvwtitle", title), body])
+    let card = ViewNode {
+        id: "lbcard".to_string(),
+        interaction: None,
+        grow: None,
+        body: NodeBody::Column {
+            gap: Some(8.0),
+            padding: Some(PaddingSpec::All(16.0)),
+            cross_align: Some(Align::Start),
+            align: None,
+            size: Some(BoxSize {
+                width: Some(SizeSpec::Fill),
+                height: Some(SizeSpec::Fill),
+                max_width: Some(1080.0),
+                max_height: Some(820.0),
+                ..BoxSize::default()
+            }),
+        },
+        children: vec![head, body, actions],
+        events: Vec::new(),
+    };
+    // 浮层自身声明 click：宿主只在点遮罩（内容之外）时回发，据此收起
+    ViewNode {
+        id: ID_LIGHTBOX.to_string(),
+        interaction: None,
+        grow: None,
+        body: NodeBody::Overlay { scrim: None },
+        children: vec![card],
+        events: vec![EventKind::Click],
+    }
 }
 
 // ---------- 设置页 ----------
@@ -760,7 +875,6 @@ pub fn build_settings(core: &Core) -> ViewNode {
         cells.push(field_row("dir", "安装目录", text_input_with_pick(SET_DIR, s.comfy_dir.clone())));
         cells.push(field_row("python", "Python 路径", text_input(SET_PYTHON, s.python_path.clone(), false)));
         cells.push(field_row("extra", "附加参数", text_input(SET_EXTRA, s.extra_args.clone(), false)));
-        cells.push(field_row("auto", "开机自启", checkbox(SET_AUTO, s.auto_start, None)));
         cells.push(process_line(core));
     }
 

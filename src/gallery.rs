@@ -1,29 +1,33 @@
 //! 结果记录流的画布布局：把「旧→新」的记录分组排成一张纵向图，一次算出绘制指令与命中区域。
 //!
 //! 绘制与命中同源于一次 [`layout`]：坐标只在结构里算一遍，指令与热区因此不会漂移。
-//! 单元格按列平铺（列数随画布宽度定），图面 cover 裁切，底部一条文件名与动作区；
-//! 运行中的批次排在最末（贴底即最新），以静态占位格呈现，格数与比例取队列里该任务的真实规格。
+//! 单元格按列平铺（列数随画布宽度定），图面 cover 裁切；格高按该批图片的真实宽高比
+//! （副本落盘时解析文件头所得），占位格按用户当前选中的比例。格面只有图本身：
+//! 点击整格开灯箱，存档 / 另存 / 复制提示词都在灯箱里（与表格编辑器图片字段同一种交互），
+//! 出错格描红边。运行中的批次排在最末（贴底即最新），进度条与步数画在占位格内。
 //! 命中返回的 id 就是动作契约（`HIT_*` 一组常量），与界面控件的动作语义一一对应，
 //! 由 app 的事件分派直接消费，画布不引入第二套动作语义。
+//!
+//! 增量提交：每条指令带稳定 id（领域键的 128 位散列），宿主画布按 id 增量维护——
+//! 布局没变就不发，变了只发差异（[`patch_plan`]）。可选视觉（副本图、进度条、标签）
+//! 从条目创建起就占住槽位（空文本占位），内容后到只做原位替换：追加会把叠层次序打乱。
+
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use atelyx_plugin_sdk::protocol::canvas::{CanvasColor, DrawCommand};
+use atelyx_plugin_sdk::protocol::canvas::{CanvasColor, CanvasUpsert, DrawCommand};
 use atelyx_plugin_sdk::protocol::view::{ColorToken, ImageFit, ImageSource, TextWeight};
 
 use crate::comfy::types::queue_item_prompt;
 use crate::history::ResultImage;
 use crate::workflow::form::{prompt_text_of, FieldSpec};
-use crate::workflow::sizing;
 
 /// 单元格最小宽度（列数按画布宽度在此基线上折算）。
 const CELL_MIN: f32 = 150.0;
-/// 画布命中区 id：整格开大图、入库、另存、复制提示词、显示更早、中断。
-/// 这套 id 只存在于画布热区（界面树里没有同名节点），动作语义与界面控件一致，由 app 统一分派。
+/// 画布命中区 id：整格开灯箱、显示更早、中断。这套 id 只存在于画布热区（界面树里没有同名节点），
+/// 动作语义与界面控件一致，由 app 统一分派。
 pub const HIT_PREVIEW: &str = "pvw:";
-pub const HIT_SAVE: &str = "save:";
-pub const HIT_SAVE_AS: &str = "sva:";
-pub const HIT_COPY: &str = "cpy:";
 pub const HIT_MORE: &str = "more";
 pub const HIT_INTERRUPT: &str = "interrupt";
 /// 列数上下界。
@@ -41,8 +45,8 @@ const GAP: f32 = 8.0;
 const CELL_FLOOR: f32 = 24.0;
 /// 标题行高度。
 const HEADER_H: f32 = 20.0;
-/// 单元格底部动作条高度。
-const BAR_H: f32 = 18.0;
+/// 格内进度条厚度。
+const PROG_H: f32 = 4.0;
 /// 一个动作小章的宽度。
 const CHIP_W: f32 = 30.0;
 const CHIP_H: f32 = 15.0;
@@ -56,33 +60,34 @@ const BAR_BG: [u8; 4] = [0, 0, 0, 150];
 const BAR_TEXT: [u8; 4] = [255, 255, 255, 235];
 const CHIP_BG: [u8; 4] = [128, 128, 128, 40];
 
-/// 一张图：定位 key、可绘制的本地副本、文件名、是否已入库、是否出错。
+/// 一张图：定位 key、可绘制的本地副本、是否出错、原图宽高比（副本落盘时解析，缺省方格）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowCell {
     pub key: String,
     pub source: Option<String>,
-    pub name: String,
-    pub saved: bool,
     pub failed: bool,
+    pub aspect: Option<f32>,
 }
 
-/// 一条已完成记录：同一批（同 promptId）的若干张图 + 标题行信息。
+/// 一条已完成记录：同一批（同 promptId）的若干张图 + 标题行信息 + 批内共同的图面比例。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowRecord {
     pub prompt_id: String,
     pub title: String,
     pub time: String,
-    pub prompt_text: String,
     pub cells: Vec<FlowCell>,
+    /// 格高基准：取批内第一张已知原图的比例（同批同尺寸），未知按方格。
+    pub aspect: f32,
 }
 
-/// 运行中批次：占位格数、比例、整批采样进度（无进度即排队中）与状态文案。
+/// 运行中批次：占位格数、比例、整批采样进度（无进度即排队中）、步数文案与状态行。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowRunning {
     pub title: String,
     pub cells: usize,
     pub aspect: f32,
     pub percent: Option<f64>,
+    pub steps: Option<String>,
     pub status: String,
 }
 
@@ -105,12 +110,27 @@ pub struct FlowHit {
     pub id: String,
 }
 
+/// 一条绘制指令及其稳定 id：宿主画布按 id 定位（命中已有原位替换、未命中追加），
+/// id 在同一画布内唯一（领域键 128 位散列，见 [`slot_prefix`]）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowDraw {
+    pub id: String,
+    pub command: DrawCommand,
+}
+
 /// 布局结果：内容总高、绘制指令、命中区域。
 #[derive(Clone, Debug, Default)]
 pub struct FlowLayout {
     pub height: f32,
-    pub commands: Vec<DrawCommand>,
+    pub draws: Vec<FlowDraw>,
     pub hits: Vec<FlowHit>,
+}
+
+impl FlowLayout {
+    /// 追加一条带 id 的指令（布局内部用）。
+    fn push(&mut self, id: String, command: DrawCommand) {
+        self.draws.push(FlowDraw { id, command });
+    }
 }
 
 /// 画布可用宽度未知时的兜底宽度（首帧按它排布，收到 `canvas.resized` 后按真实宽度重排）。
@@ -188,13 +208,12 @@ fn is_wide(c: char) -> bool {
         | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6)
 }
 
-/// 队列任务里的输出规格（比例、张数）：与生成坞三段同一口径（`sizing` 的字段判定），
-/// 占位格按该任务自己的宽高算，不依赖当前草稿。
+/// 队列任务里的输出规格（比例、张数）：与生成坞三段同一口径（`sizing` 的字段判定）。
 pub fn running_spec(prompt: &Value, fields: &[FieldSpec]) -> (f32, usize) {
-    let aspect = sizing::output_size(prompt, fields)
+    let aspect = crate::workflow::sizing::output_size(prompt, fields)
         .map(|(w, h)| (w / h) as f32)
         .unwrap_or(1.0);
-    (aspect, sizing::batch_count(prompt, fields).clamp(1, 12))
+    (aspect, crate::workflow::sizing::batch_count(prompt, fields).clamp(1, 12))
 }
 
 /// 画廊条目按 promptId 聚合成记录（同批多张并成一条），展示顺序旧→新（最新沉在底部）。
@@ -217,6 +236,15 @@ pub fn records_of(results: &[ResultImage]) -> Vec<FlowRecord> {
         .rev()
         .map(|(prompt_id, items)| {
             let lead = items[0];
+            let cells: Vec<FlowCell> = items
+                .iter()
+                .map(|item| FlowCell {
+                    key: item.key.clone(),
+                    source: item.display_source(),
+                    failed: item.failed,
+                    aspect: item.pixel.map(|(w, h)| if h > 0 { w as f32 / h as f32 } else { 1.0 }),
+                })
+                .collect();
             FlowRecord {
                 prompt_id: prompt_id.to_string(),
                 title: if lead.prompt_text.is_empty() {
@@ -225,17 +253,8 @@ pub fn records_of(results: &[ResultImage]) -> Vec<FlowRecord> {
                     lead.prompt_text.clone()
                 },
                 time: format_time(lead.created_at),
-                prompt_text: lead.prompt_text.clone(),
-                cells: items
-                    .iter()
-                    .map(|item| FlowCell {
-                        key: item.key.clone(),
-                        source: item.display_source(),
-                        name: item.image_ref.filename.clone(),
-                        saved: item.saved_path.is_some(),
-                        failed: item.failed,
-                    })
-                    .collect(),
+                aspect: cells.iter().find_map(|cell| cell.aspect).unwrap_or(1.0),
+                cells,
             }
         })
         .collect()
@@ -253,23 +272,23 @@ pub fn format_time(millis: f64) -> String {
     }
 }
 
-/// 从队列快照拼出运行中批次：队首任务的规格与提示词 + 运行/等待计数。
-/// 字段规格由调用方按队首任务的提示词备好后经 `fields_of` 交出，画布层只做纯换算。
+/// 从队列快照拼出运行中批次：规格（比例、张数）由调用方按当前草稿或队首任务备好，
+/// 画布层只做纯换算；标题取队首任务的提示词。
 pub fn running_block(
     running: &[Value],
     pending: &[Value],
     percent: Option<f64>,
-    fields_of: impl Fn(&Value) -> Vec<FieldSpec>,
+    steps: Option<String>,
+    spec: (f32, usize),
 ) -> Option<FlowRunning> {
     let lead = running.first().or(pending.first())?;
-    let prompt = queue_item_prompt(lead).cloned().unwrap_or(Value::Null);
-    let (aspect, cells) = running_spec(&prompt, &fields_of(&prompt));
-    let text = prompt_text_of(&prompt);
+    let text = prompt_text_of(&queue_item_prompt(lead).cloned().unwrap_or(Value::Null));
     Some(FlowRunning {
         title: if text.is_empty() { "生成中".to_string() } else { text },
-        cells,
-        aspect,
+        cells: spec.1,
+        aspect: spec.0,
         percent: percent.filter(|value| value.is_finite()),
+        steps,
         status: format!("运行 {} · 等待 {}", running.len(), pending.len()),
     })
 }
@@ -290,7 +309,7 @@ pub fn layout(input: &FlowInput) -> FlowLayout {
         push_running(&mut out, width, columns, running);
     }
     out.height += PAD;
-    out.commands.insert(0, rect(0.0, 0.0, width, out.height, Some(rgba(SOFT)), None));
+    out.draws.insert(0, FlowDraw { id: "bg".to_string(), command: rect(0.0, 0.0, width, out.height, Some(rgba(SOFT)), None) });
     out
 }
 
@@ -298,32 +317,27 @@ fn push_chip(out: &mut FlowLayout, width: f32, label: &str, id: &str) {
     let y = out.height + PAD;
     let w = (text_px(label, 11.0) + 12.0).min(width - PAD * 2.0).max(1.0);
     let x = (width - w) / 2.0;
-    out.commands.push(rect(x, y, w, CHIP_H, Some(rgba(CHIP_BG)), Some(rgba(SOFT_EDGE))));
-    out.commands.push(text(x + 6.0, y + 2.0, label, 11.0, token(ColorToken::TextMuted), None));
+    out.push(format!("{id}:r"), rect(x, y, w, CHIP_H, Some(rgba(CHIP_BG)), Some(rgba(SOFT_EDGE))));
+    out.push(format!("{id}:t"), text(x + 6.0, y + 2.0, label, 11.0, token(ColorToken::TextMuted), None));
     out.hits.push(FlowHit { x, y, w, h: CHIP_H, id: id.to_string() });
     out.height = y + CHIP_H + GAP;
 }
 
-/// 一条已完成记录：标题行（提示词/时间/复制）+ 图格墙（每格一条底部动作条）。
+/// 一条已完成记录：标题行（提示词/时间）+ 图格墙（格面只有图，动作进灯箱）。
 fn push_record(out: &mut FlowLayout, width: f32, columns: usize, record: &FlowRecord) {
     let top = out.height + PAD;
     let rows = record.cells.len().div_ceil(columns.max(1));
-    let (cell_w, cell_h) = cell_size(width, columns, 1.0);
+    let (cell_w, cell_h) = cell_size(width, columns, record.aspect);
     let body_h = rows as f32 * cell_h + (rows.saturating_sub(1)) as f32 * GAP;
     let card_h = HEADER_H + GAP + body_h + PAD * 2.0;
-    out.commands.push(rounded_card(width, top, card_h));
+    let slot = slot_prefix("r", &record.prompt_id);
+    out.push(format!("{slot}:card"), rounded_card(width, top, card_h));
 
     let (chip_x, chip_y) = (width - content_left() - CHIP_W, top + PAD + 2.0);
     let title_w = content_width(width) - CHIP_W - TIME_W - GAP;
-    out.commands.push(text(content_left(), top + PAD, &clip_text(&record.title, title_w, 12.0), 12.0, token(ColorToken::Text), Some(TextWeight::Medium)));
-    if !record.time.is_empty() {
-        out.commands.push(text(chip_x - GAP - TIME_W, chip_y + 1.0, &record.time, 11.0, token(ColorToken::TextMuted), None));
-    }
-    if !record.prompt_text.is_empty() {
-        out.commands.push(rect(chip_x, chip_y, CHIP_W, CHIP_H, Some(rgba(CHIP_BG)), None));
-        out.commands.push(text(chip_x + 5.0, chip_y + 2.0, "复制", 10.0, token(ColorToken::TextMuted), None));
-        out.hits.push(FlowHit { x: chip_x, y: chip_y, w: CHIP_W, h: CHIP_H, id: format!("{HIT_COPY}{}", record.prompt_id) });
-    }
+    out.push(format!("{slot}:title"), text(content_left(), top + PAD, &clip_text(&record.title, title_w, 12.0), 12.0, token(ColorToken::Text), Some(TextWeight::Medium)));
+    // 时间从建立起占槽：内容后到走原位替换，不打乱叠层次序
+    out.push(format!("{slot}:time"), text(chip_x - GAP - TIME_W, chip_y + 1.0, &record.time, 11.0, token(ColorToken::TextMuted), None));
 
     for (index, cell) in record.cells.iter().enumerate() {
         let x = PAD * 2.0 + (index % columns) as f32 * (cell_w + GAP);
@@ -333,43 +347,30 @@ fn push_record(out: &mut FlowLayout, width: f32, columns: usize, record: &FlowRe
     out.height = top + card_h + GAP;
 }
 
-/// 一个图格：副本就绪就贴 cover 图，否则留底色占位；底部一条文件名 + 入库/另存动作区。
+/// 一个图格：副本就绪就贴 cover 图，否则留底色占位，出错描红边；点击整格开灯箱。
 fn push_cell(out: &mut FlowLayout, cell: &FlowCell, x: f32, y: f32, w: f32, h: f32) {
+    let slot = slot_prefix("c", &cell.key);
     let border = if cell.failed { Some(token(ColorToken::Danger)) } else { Some(rgba(SOFT_EDGE)) };
-    out.commands.push(rect(x, y, w, h, Some(rgba(SOFT)), border));
-    if let Some(path) = &cell.source {
-        out.commands.push(DrawCommand::Image {
-            source: ImageSource::Private { path: path.clone() },
-            x,
-            y,
-            w,
-            h,
-            fit: Some(ImageFit::Cover),
-        });
+    out.push(format!("{slot}:bg"), rect(x, y, w, h, Some(rgba(SOFT)), border));
+    // 图片槽先建：副本落定后原位替换，追加会把图片盖到既有图层之上
+    match &cell.source {
+        Some(path) => out.push(
+            format!("{slot}:img"),
+            DrawCommand::Image {
+                source: ImageSource::Private { path: path.clone() },
+                x,
+                y,
+                w,
+                h,
+                fit: Some(ImageFit::Cover),
+            },
+        ),
+        None => out.push(format!("{slot}:img"), blank(x, y)),
     }
     out.hits.push(FlowHit { x, y, w, h, id: format!("{HIT_PREVIEW}{}", cell.key) });
-
-    let bar_y = y + h - BAR_H;
-    out.commands.push(rect(x, bar_y, w, BAR_H, Some(rgba(BAR_BG)), None));
-    let name_w = w - 2.0 * (CHIP_W + 4.0) - 8.0;
-    out.commands.push(text(x + 4.0, bar_y + 3.0, &clip_text(&cell.name, name_w.max(0.0), 10.0), 10.0, rgba(BAR_TEXT), None));
-
-    let mut chip_x = x + w - CHIP_W - 4.0;
-    out.commands.push(rect(chip_x, bar_y + 1.5, CHIP_W, CHIP_H, Some(rgba(CHIP_BG)), None));
-    out.commands.push(text(chip_x + 5.0, bar_y + 3.5, "另存", 10.0, rgba(BAR_TEXT), None));
-    out.hits.push(FlowHit { x: chip_x, y: bar_y, w: CHIP_W, h: BAR_H, id: format!("{HIT_SAVE_AS}{}", cell.key) });
-
-    chip_x -= CHIP_W + 4.0;
-    if cell.saved {
-        out.commands.push(text(chip_x + 2.0, bar_y + 3.5, "已存", 10.0, token(ColorToken::Success), None));
-    } else {
-        out.commands.push(rect(chip_x, bar_y + 1.5, CHIP_W, CHIP_H, Some(rgba(CHIP_BG)), None));
-        out.commands.push(text(chip_x + 9.0, bar_y + 3.5, "存", 10.0, rgba(BAR_TEXT), None));
-        out.hits.push(FlowHit { x: chip_x, y: bar_y, w: CHIP_W, h: BAR_H, id: format!("{HIT_SAVE}{}", cell.key) });
-    }
 }
 
-/// 运行中批次：静态占位格（排队/已出/进行中/待出四态），进行中格写整批进度百分比。
+/// 运行中批次：静态占位格（排队/已出/进行中/待出四态），进行中格内画进度条与步数。
 fn push_running(out: &mut FlowLayout, width: f32, columns: usize, running: &FlowRunning) {
     let top = out.height + PAD;
     let cells = running.cells.clamp(1, 12);
@@ -377,15 +378,16 @@ fn push_running(out: &mut FlowLayout, width: f32, columns: usize, running: &Flow
     let (cell_w, cell_h) = cell_size(width, columns, running.aspect);
     let body_h = rows as f32 * cell_h + (rows.saturating_sub(1)) as f32 * GAP;
     let card_h = HEADER_H + GAP + body_h + PAD * 2.0;
-    out.commands.push(rounded_card(width, top, card_h));
+    out.push("run:card".to_string(), rounded_card(width, top, card_h));
     let (chip_x, chip_y) = (width - content_left() - CHIP_W, top + PAD + 2.0);
     let title_w = content_width(width) - CHIP_W - TIME_W - GAP;
-    out.commands.push(text(content_left(), top + PAD, &clip_text(&running.title, title_w, 12.0), 12.0, token(ColorToken::Text), Some(TextWeight::Medium)));
-    out.commands.push(text(chip_x - GAP - TIME_W, chip_y + 1.0, &clip_text(&running.status, TIME_W, 11.0), 11.0, token(ColorToken::TextMuted), None));
-    out.commands.push(rect(chip_x, chip_y, CHIP_W, CHIP_H, Some(rgba(CHIP_BG)), None));
-    out.commands.push(text(chip_x + 5.0, chip_y + 2.0, "中断", 10.0, token(ColorToken::Danger), None));
+    out.push("run:title".to_string(), text(content_left(), top + PAD, &clip_text(&running.title, title_w, 12.0), 12.0, token(ColorToken::Text), Some(TextWeight::Medium)));
+    out.push("run:status".to_string(), text(chip_x - GAP - TIME_W, chip_y + 1.0, &clip_text(&running.status, TIME_W, 11.0), 11.0, token(ColorToken::TextMuted), None));
+    out.push("run:chip:r".to_string(), rect(chip_x, chip_y, CHIP_W, CHIP_H, Some(rgba(CHIP_BG)), None));
+    out.push("run:chip:t".to_string(), text(chip_x + 5.0, chip_y + 2.0, "中断", 10.0, token(ColorToken::Danger), None));
     out.hits.push(FlowHit { x: chip_x, y: chip_y, w: CHIP_W, h: CHIP_H, id: HIT_INTERRUPT.to_string() });
 
+    let pct = running.percent.map(|value| (value / 100.0).clamp(0.0, 1.0));
     for index in 0..cells {
         let x = PAD * 2.0 + (index % columns) as f32 * (cell_w + GAP);
         let y = top + PAD + HEADER_H + GAP + (index / columns) as f32 * (cell_h + GAP);
@@ -398,17 +400,28 @@ fn push_running(out: &mut FlowLayout, width: f32, columns: usize, running: &Flow
             CellState::Done | CellState::Active => Some(token(ColorToken::Accent)),
             _ => Some(rgba(SOFT_EDGE)),
         };
-        out.commands.push(rect(x, y, cell_w, cell_h, Some(fill), edge));
+        out.push(format!("run{index}:bg"), rect(x, y, cell_w, cell_h, Some(fill), edge));
+        // 进度条画在格内底部：轨道与填充槽位从建立起占住，进度推进只做原位替换
+        let (track, bar) = match (state, pct) {
+            (CellState::Active, Some(pct)) => (
+                rect(x, y + cell_h - PROG_H, cell_w, PROG_H, Some(rgba(BAR_BG)), None),
+                rect(x, y + cell_h - PROG_H, (cell_w * pct as f32).max(2.0), PROG_H, Some(token(ColorToken::Accent)), None),
+            ),
+            _ => (blank(x, y + cell_h - PROG_H), blank(x, y + cell_h - PROG_H)),
+        };
+        out.push(format!("run{index}:trk"), track);
+        out.push(format!("run{index}:fill"), bar);
         let label = match state {
             CellState::Queued => "排队中".to_string(),
-            CellState::Active => format!("{:.0}%", running.percent.unwrap_or(0.0).clamp(0.0, 100.0)),
+            CellState::Active => running
+                .steps
+                .clone()
+                .unwrap_or_else(|| format!("{:.0}%", running.percent.unwrap_or(0.0).clamp(0.0, 100.0))),
             CellState::Done => "已出".to_string(),
             CellState::Waiting => String::new(),
         };
-        if !label.is_empty() {
-            let size = if cell_h > 120.0 { 20.0 } else if cell_h > 80.0 { 15.0 } else { 12.0 };
-            out.commands.push(text(x + 8.0, y + (cell_h - size) / 2.0, &label, size, token(ColorToken::TextMuted), None));
-        }
+        let size = if cell_h > 120.0 { 20.0 } else if cell_h > 80.0 { 15.0 } else { 12.0 };
+        out.push(format!("run{index}:lbl"), text(x + 8.0, y + (cell_h - size) / 2.0, &label, size, token(ColorToken::TextMuted), None));
     }
     out.height = top + card_h + GAP;
 }
@@ -436,6 +449,40 @@ fn cell_state(index: usize, cells: usize, percent: Option<f64>) -> CellState {
     } else {
         CellState::Waiting
     }
+}
+
+/// 增量提交计划：与宿主当前清单（基线）比对，新增/变化的条目走 upsert、消失的 id 走 remove。
+/// 布局期 id 全画布唯一（领域键 128 位散列），故一次请求内不会重复命中同一 id。
+pub fn patch_plan(base: &[FlowDraw], next: &[FlowDraw]) -> (Vec<CanvasUpsert>, Vec<String>) {
+    let index: HashMap<&str, &DrawCommand> = base.iter().map(|draw| (draw.id.as_str(), &draw.command)).collect();
+    let mut upsert = Vec::new();
+    for draw in next {
+        if index.get(draw.id.as_str()) != Some(&&draw.command) {
+            upsert.push(CanvasUpsert { id: draw.id.clone(), command: draw.command.clone() });
+        }
+    }
+    let live: HashSet<&str> = next.iter().map(|draw| draw.id.as_str()).collect();
+    let remove: Vec<String> =
+        base.iter().filter(|draw| !live.contains(draw.id.as_str())).map(|draw| draw.id.clone()).collect();
+    (upsert, remove)
+}
+
+/// 条目 id 前缀：领域键（promptId / 记录 key）的 128 位散列。同一键恒定同一 id，
+/// 不同键不碰撞（千级条目量下概率可忽略）；长度受宿主 64 字节上限约束。
+fn slot_prefix(prefix: &str, key: &str) -> String {
+    let (hi, lo) = hash128(key.as_bytes());
+    format!("{prefix}{hi:016x}{lo:016x}")
+}
+
+/// 128 位 FNV-1a：两轮不同偏移量并行推进，输出拼接成 32 位十六进制。
+fn hash128(bytes: &[u8]) -> (u64, u64) {
+    let mut hi: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut lo: u64 = 0x9e37_79b9_7f4a_7c15;
+    for byte in bytes {
+        hi = (hi ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        lo = (lo ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hi, lo)
 }
 
 /// 命中测试：指针的节点本地坐标落在哪个热区（后画优先，与遮挡顺序一致）。
@@ -479,13 +526,17 @@ fn text(x: f32, y: f32, content: &str, size: f32, color: CanvasColor, weight: Op
     DrawCommand::Text { x, y, content: content.to_string(), size, color, weight }
 }
 
+/// 空占位指令：槽位先建、内容后到时保持叠层次序不变（追加会把后到的内容盖到既有图层上）。
+/// 空文本不画任何内容，仅通过宿主指令校验（字号为正）。
+fn blank(x: f32, y: f32) -> DrawCommand {
+    text(x, y, "", 10.0, rgba(BAR_TEXT), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use atelyx_plugin_sdk::protocol::canvas::validate_commands;
     use crate::comfy::types::ImageRef;
-    use crate::workflow::form::build_fields;
-    use serde_json::json;
 
     fn result(prompt_id: &str, key: &str, created: f64, local: Option<&str>) -> ResultImage {
         ResultImage {
@@ -498,6 +549,7 @@ mod tests {
             failed: false,
             saved_path: None,
             local: local.map(str::to_string),
+            pixel: None,
             copy_attempts: 0,
         }
     }
@@ -542,43 +594,53 @@ mod tests {
 
     #[test]
     fn records_group_by_prompt_and_run_old_to_new() {
-        // 画廊最近在前：同批两张并成一条，最新批沉在底部
-        let items = vec![
-            result("p2", "b", 2000.0, Some("history/b.png")),
-            result("p1", "a", 1000.0, None),
-            result("p1", "a2", 1000.0, Some("history/a2.png")),
-        ];
+        // 画廊最近在前：同批两张并成一条，最新批沉在底部；格高取批内已知比例
+        let mut wide = result("p2", "b", 2000.0, Some("history/b.png"));
+        wide.pixel = Some((1024, 512));
+        let items = vec![wide, result("p1", "a", 1000.0, None), result("p1", "a2", 1000.0, Some("history/a2.png"))];
         let records = records_of(&items);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].prompt_id, "p1");
         assert_eq!(records[0].cells.len(), 2);
+        assert_eq!(records[0].aspect, 1.0, "批内无已知比例按方格");
         assert_eq!(records[0].cells[0].source, None, "缺副本的格子按占位处理");
         assert_eq!(records[1].prompt_id, "p2");
+        assert!((records[1].aspect - 2.0).abs() < 0.001, "批内首张已知比例生效");
     }
 
     #[test]
-    fn running_spec_follows_panel_field_rules() {
-        // 张数与宽高按 `sizing` 的字段口径取：优先空潜像节点的宽高、首个未连线 batch_size，
-        // 下游 ImageBatch 的 batch_size 不参与，避免占位格数与真实产出对不上。
-        let prompt = json!({
-            "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 1368, "batch_size": 2}},
-            "2": {"class_type": "ImageBatch", "inputs": {"batch_size": 4}},
-        });
-        let (aspect, cells) = running_spec(&prompt, &build_fields(&prompt, None));
-        assert!((aspect - 768.0 / 1368.0).abs() < 0.001);
-        assert_eq!(cells, 2);
-
-        let object_info = json!({"ResolutionSelector": {"input": {"required": {
-            "aspect_ratio": [["1:1 (Square)", "16:9 (Wide)"], {"default": "1:1 (Square)"}],
-            "megapixels": ["FLOAT", {"default": 1.0}],
-            "multiple": ["INT", {"default": 8}],
-        }}}});
-        let selector = json!({"1": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": "16:9 (Wide)", "megapixels": 1.0, "multiple": 8}}});
-        let (aspect, cells) = running_spec(&selector, &build_fields(&selector, Some(&object_info)));
-        assert!((aspect - 16.0 / 9.0).abs() < 0.01, "选择器按换算后的宽高给比例：{aspect}");
-        assert_eq!(cells, 1);
-
-        assert_eq!(running_spec(&json!([]), &[]), (1.0, 1), "认不出规格时按 1:1 单张兜底");
+    fn record_aspect_drives_cell_height() {
+        let input = FlowInput {
+            width: 360.0,
+            records: vec![
+                FlowRecord {
+                    prompt_id: "p1".into(),
+                    title: "方图".into(),
+                    time: String::new(),
+                    aspect: 1.0,
+                    cells: vec![FlowCell { key: "k1".into(), source: None, failed: false, aspect: None }],
+                },
+                FlowRecord {
+                    prompt_id: "p2".into(),
+                    title: "横图".into(),
+                    time: String::new(),
+                    aspect: 2.0,
+                    cells: vec![FlowCell { key: "k2".into(), source: None, failed: false, aspect: Some(2.0) }],
+                },
+            ],
+            ..FlowInput::default()
+        };
+        let flow = layout(&input);
+        let height_of = |key: &str| {
+            let slot = format!("{}:bg", slot_prefix("c", key));
+            match flow.draws.iter().find(|d| d.id == slot).expect("格存在").command {
+                DrawCommand::Rect { h, .. } => h,
+                _ => panic!("格底应是矩形"),
+            }
+        };
+        let square = height_of("k1");
+        let wide = height_of("k2");
+        assert!((wide - square / 2.0).abs() < 0.01, "横图格高应为方格一半：{square} vs {wide}");
     }
 
     #[test]
@@ -598,13 +660,20 @@ mod tests {
                 prompt_id: "p1".into(),
                 title: "一只猫".into(),
                 time: "10-01 12:00".into(),
-                prompt_text: "一只猫".into(),
+                aspect: 1.0,
                 cells: vec![
-                    FlowCell { key: "k1".into(), source: Some("history/k1.png".into()), name: "0001.png".into(), saved: true, failed: false },
-                    FlowCell { key: "k2".into(), source: None, name: "0002.png".into(), saved: false, failed: true },
+                    FlowCell { key: "k1".into(), source: Some("history/k1.png".into()), failed: false, aspect: None },
+                    FlowCell { key: "k2".into(), source: None, failed: true, aspect: None },
                 ],
             }],
-            running: Some(FlowRunning { title: "生成中".into(), cells: 2, aspect: 1.0, percent: Some(40.0), status: "运行 1 · 等待 0".into() }),
+            running: Some(FlowRunning {
+                title: "生成中".into(),
+                cells: 2,
+                aspect: 1.0,
+                percent: Some(40.0),
+                steps: Some("8/25".into()),
+                status: "运行 1 · 等待 0".into(),
+            }),
             earlier_label: Some("显示更早".into()),
         }
     }
@@ -613,23 +682,16 @@ mod tests {
     fn layout_hits_are_drawn_on_top_of_their_cell() {
         let flow = layout(&sample_input());
         assert!(flow.height > 200.0, "内容总高随记录堆出：{}", flow.height);
-        assert!(validate_commands(&flow.commands).is_ok(), "绘制清单须过宿主校验");
+        let commands: Vec<DrawCommand> = flow.draws.iter().map(|draw| draw.command.clone()).collect();
+        assert!(validate_commands(&commands).is_ok(), "绘制清单须过宿主校验");
 
-        // 章心既在格子热区内又在自己的热区内：后画的章必须赢
-        let chip = flow.hits.iter().find(|hit| hit.id == "sva:k2").expect("未入库的格子有另存章");
-        let center_x = chip.x + chip.w / 2.0;
-        let center_y = chip.y + chip.h / 2.0;
-        assert_eq!(hit_test(&flow, center_x, center_y), Some("sva:k2"));
-
-        let preview = flow.hits.iter().find(|hit| hit.id == "pvw:k1").expect("格子可点大图");
+        let preview = flow.hits.iter().find(|hit| hit.id == "pvw:k1").expect("格子可点开灯箱");
         assert_eq!(hit_test(&flow, preview.x + 4.0, preview.y + 4.0), Some("pvw:k1"));
         assert_eq!(hit_test(&flow, -1.0, -1.0), None);
-        // 已入库的格子不再有存章
-        assert!(!flow.hits.iter().any(|hit| hit.id == "save:k1"));
-        assert!(flow.hits.iter().any(|hit| hit.id == "save:k2"));
-        assert!(flow.hits.iter().any(|hit| hit.id == "cpy:p1"));
         assert!(flow.hits.iter().any(|hit| hit.id == "more"));
         assert!(flow.hits.iter().any(|hit| hit.id == "interrupt"));
+        // 存档 / 另存 / 复制动作都进灯箱：格面只剩整格预览热区
+        assert!(flow.hits.iter().all(|hit| hit.id.starts_with("pvw:") || hit.id == "more" || hit.id == "interrupt"));
     }
 
     #[test]
@@ -637,5 +699,116 @@ mod tests {
         let flow = layout(&FlowInput::default());
         assert!(flow.hits.is_empty());
         assert!(flow.height > 0.0, "空流仍占一条底色带，避免画布高度为 0");
+    }
+
+    /// 进行中的占位格内画进度条（轨道 + 填充），其他态只有空占位。
+    #[test]
+    fn active_running_cell_carries_progress_bar() {
+        let flow = layout(&sample_input());
+        let command_of = |id: &str| flow.draws.iter().find(|d| d.id == id).expect("槽存在").command.clone();
+        assert!(matches!(command_of("run0:trk"), DrawCommand::Rect { .. }), "进行中格有轨道");
+        assert!(matches!(command_of("run0:fill"), DrawCommand::Rect { .. }), "进行中格有填充条");
+        let label = match command_of("run0:lbl") {
+            DrawCommand::Text { content, .. } => content,
+            _ => panic!("标签应是文本"),
+        };
+        assert_eq!(label, "8/25", "步数文案优先于百分比");
+        for id in ["run1:trk", "run1:fill"] {
+            assert!(matches!(command_of(id), DrawCommand::Text { .. }), "非进行中格 {id} 是空占位");
+        }
+    }
+
+    // ---------- 增量提交 ----------
+
+    /// 两次同一输入的布局：id 序列完全一致（增量基线稳定的前提）。
+    #[test]
+    fn ids_are_stable_and_unique_per_layout() {
+        let first = layout(&sample_input());
+        let second = layout(&sample_input());
+        assert_eq!(
+            first.draws.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            second.draws.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            "同一布局的 id 序列必须恒定"
+        );
+        let mut ids: HashSet<&str> = HashSet::new();
+        for draw in &first.draws {
+            assert!(draw.id.len() <= 64, "id 超出入住上限：{}", draw.id);
+            assert!(ids.insert(draw.id.as_str()), "id 重复：{}", draw.id);
+        }
+        assert!(first.draws.len() > 10, "样例布局应含背景、章、记录与运行块");
+    }
+
+    /// 副本落定只换图片槽内容：id 不变、清单位置不变（原位替换）。
+    #[test]
+    fn late_image_replaces_its_slot_in_place() {
+        let mut input = sample_input();
+        input.records[0].cells[1].source = None;
+        let before = layout(&input);
+        input.records[0].cells[1].source = Some("history/k2.png".into());
+        let after = layout(&input);
+
+        let slot = format!("{}:img", slot_prefix("c", "k2"));
+        let before_draw = before.draws.iter().find(|d| d.id == slot).expect("缺副本也占图片槽");
+        let after_draw = after.draws.iter().find(|d| d.id == slot).expect("副本就绪仍用同一槽");
+        assert!(matches!(before_draw.command, DrawCommand::Text { .. }), "占位是空文本");
+        assert!(matches!(after_draw.command, DrawCommand::Image { .. }), "副本就绪换成图片");
+        let position = |flow: &FlowLayout| flow.draws.iter().position(|d| d.id == slot).expect("槽存在");
+        assert_eq!(position(&before), position(&after), "原位替换不改变清单位置");
+    }
+
+    #[test]
+    fn patch_plan_is_empty_when_nothing_changed() {
+        let flow = layout(&sample_input());
+        let (upsert, remove) = patch_plan(&flow.draws, &flow.draws);
+        assert!(upsert.is_empty() && remove.is_empty(), "布局没变不发任何增量");
+    }
+
+    #[test]
+    fn patch_plan_upserts_changed_and_new_then_removes_gone() {
+        let mut input = sample_input();
+        let base = layout(&input);
+        // 变化：p1 标题；新增：p2 整条（顶部章不动——移除它会平移其后全部坐标）
+        input.records[0].title = "两只猫".into();
+        input.records.push(FlowRecord {
+            prompt_id: "p2".into(),
+            title: "第二幕".into(),
+            time: "10-02 09:00".into(),
+            aspect: 1.0,
+            cells: vec![FlowCell { key: "k9".into(), source: None, failed: false, aspect: None }],
+        });
+        let next = layout(&input);
+
+        let (upsert, remove) = patch_plan(&base.draws, &next.draws);
+        let upsert_ids: HashSet<&str> = upsert.iter().map(|item| item.id.as_str()).collect();
+        let title_slot = format!("{}:title", slot_prefix("r", "p1"));
+        assert!(upsert_ids.contains(title_slot.as_str()), "标题变化的那条要重发");
+        assert!(upsert_ids.contains(format!("{}:card", slot_prefix("r", "p2")).as_str()), "新纪录整条要发");
+        // 其余条目原样不动：增量远小于整表
+        assert!(upsert.len() < next.draws.len(), "只发变化项：{} < {}", upsert.len(), next.draws.len());
+        assert!(remove.is_empty(), "没有条目消失");
+    }
+
+    #[test]
+    fn patch_plan_removes_evicted_entries() {
+        let mut input = sample_input();
+        let base = layout(&input);
+        input.earlier_label = None; // 章消失：坐标整体上移，其余条目照旧、章的两个槽走删除
+        let next = layout(&input);
+        let (upsert, remove) = patch_plan(&base.draws, &next.draws);
+        assert!(remove.iter().any(|id| id == "more:r") && remove.iter().any(|id| id == "more:t"), "章消失要走删除：{remove:?}");
+        assert!(upsert.iter().all(|item| !item.id.starts_with("more:")), "章不再出现");
+    }
+
+    /// 从空基线建立 = 全量 upsert，且顺序与布局一致（宿主按序入列）。
+    #[test]
+    fn establishing_from_empty_base_sends_everything_in_order() {
+        let flow = layout(&sample_input());
+        let (upsert, remove) = patch_plan(&[], &flow.draws);
+        assert!(remove.is_empty());
+        assert_eq!(upsert.len(), flow.draws.len());
+        for (item, draw) in upsert.iter().zip(&flow.draws) {
+            assert_eq!(item.id, draw.id);
+            assert_eq!(item.command, draw.command);
+        }
     }
 }

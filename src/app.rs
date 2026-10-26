@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use atelyx_plugin_sdk::protocol::method::{
     CanvasResizedParams, ContributionSlot, FileFilter, NotificationLevel, PickFileParams, ScrollEdge,
-    SurfaceKind, SurfaceAttachedParams, SurfaceDetachedParams, ViewEventParams, WindowOpenParams,
+    SurfaceAttachedParams, SurfaceDetachedParams, ViewEventParams,
 };
 use atelyx_plugin_sdk::protocol::view::{CanvasPointer, EventValue, MouseButton, PaddingSpec, ViewEvent};
 use atelyx_plugin_sdk::Context;
@@ -35,8 +35,6 @@ use crate::workflow::sizing;
 pub const SURFACE_PANEL: &str = "generate";
 /// 设置页贡献 id。
 pub const SURFACE_SETTINGS: &str = "comfyui";
-/// 大图预览窗口 id：经 `window.open` 按需打开，同时是该窗口面的 surfaceId。
-pub const SURFACE_PREVIEW: &str = "preview";
 
 /// 状态信封结构版本。
 const STATE_VERSION: u64 = 1;
@@ -66,12 +64,15 @@ pub struct Session {
     pub seed_mode: BTreeSet<String>,
     pub current_changed: bool,
     pub notice: String,
-    /// 预览窗口当前展示的结果 key。
-    pub preview_key: Option<String>,
+    /// 记录流灯箱当前展示的结果 key（面内浮层，见 views::build_lightbox）。
+    pub lightbox_key: Option<String>,
     /// 记录流画布宽度：宿主 `canvas.resized` 回报的真实分配宽度，布局坐标与命中都按它算。
     pub gallery_width: f32,
     /// 上一次提交的记录流布局：指针命中按它算，用户点的就是他刚看到的那一版。
     pub flow: Option<gallery::FlowLayout>,
+    /// 记录流画布的增量基线：宿主清单里当前各 id 对应的指令（上次成功提交的绘制集）。
+    /// 画布不在树里（宿主已随树清清单）或树提交失败时置空，下一轮整份重建。
+    pub canvas_base: Vec<gallery::FlowDraw>,
     /// 记录流已展示的记录批次数，「显示更早」递增。
     pub shown_batches: usize,
     /// 用户是否停在记录流末端（宿主回发的滚动位置）：只有在看最新一屏时，新结果才把视口贴到底。
@@ -165,14 +166,13 @@ impl App {
             save_gen: AtomicU64::new(0),
         });
 
-        for surface in [SURFACE_PANEL, SURFACE_SETTINGS, SURFACE_PREVIEW] {
+        for surface in [SURFACE_PANEL, SURFACE_SETTINGS] {
             let build_app = Arc::clone(&app);
             app.ctx
                 .ui()
                 .mount(surface, move || match surface {
                     SURFACE_PANEL => views::build_panel(&build_app.core()),
-                    SURFACE_SETTINGS => views::build_settings(&build_app.core()),
-                    _ => views::build_preview(&build_app.core()),
+                    _ => views::build_settings(&build_app.core()),
                 })
                 .await;
         }
@@ -183,26 +183,17 @@ impl App {
         app
     }
 
-    /// 注册贡献点、跑首轮刷新、按设置托管自启。
+    /// 注册贡献点、跑首轮刷新。
     pub async fn after_ready(self: &Arc<App>) {
         // 面外壳内边距归插件自己控制（零外壳 + 根列 12），避免与宿主默认内边距叠加。
         let pad = Some(PaddingSpec::All(0.0));
         let _ = self.ctx.register(ContributionSlot::Panel, SURFACE_PANEL, "ComfyUI 生成", Some("sparkles"), pad).await;
         let _ = self.ctx.register(ContributionSlot::Settings, SURFACE_SETTINGS, "ComfyUI", Some("server"), pad).await;
+        // Agent 工具：旧宿主没有这个方法时静默降级（工具不出现，面板功能不受影响）
+        crate::agent::register(&self.ctx).await;
 
         self.run_poll_cycle().await;
         self.refresh_workflows_cycle().await;
-
-        let should_autostart = {
-            let core = self.core();
-            core.settings.auto_start && core.settings.process_mode == ProcessMode::Managed && !core.host.running && !core.host.starting
-        };
-        if should_autostart {
-            let app = self.clone();
-            tokio::spawn(async move {
-                controller::start(&app).await;
-            });
-        }
     }
 
     // ---------- 状态访问 ----------
@@ -236,16 +227,28 @@ impl App {
 
     async fn render_loop(app: Arc<App>, mut rx: watch::Receiver<u64>) {
         while rx.changed().await.is_ok() {
-            let (panel_attached, commands, stick, settings_attached, preview_attached) = {
+            let (panel_attached, draws, canvas_present, stick, settings_attached) = {
                 let mut core = app.core();
-                let mut commands = Vec::new();
+                let mut draws = Vec::new();
                 let panel_attached = core.attached.contains(SURFACE_PANEL);
                 if panel_attached {
+                    // 灯箱条目被历史淘汰或已失去副本时自动收起，不留空浮层。
+                    if let Some(key) = &core.session.lightbox_key {
+                        let gone = !core
+                            .runtime
+                            .snap
+                            .results
+                            .iter()
+                            .any(|item| &item.key == key && item.local.is_some());
+                        if gone {
+                            core.session.lightbox_key = None;
+                        }
+                    }
                     let flow = gallery::layout(&flow_input(&core));
                     // 没有任何可点条目时画布只剩一块灰底，不如让界面给出文字说明。
                     core.session.flow = (!flow.hits.is_empty()).then_some(flow);
                     if let Some(flow) = &core.session.flow {
-                        commands = flow.commands.clone();
+                        draws = flow.draws.clone();
                     }
                 } else {
                     core.session.flow = None;
@@ -256,15 +259,29 @@ impl App {
                     core.session.flow_stick = false;
                 }
                 let settings_attached = core.attached.contains(SURFACE_SETTINGS);
-                let preview_attached = core.attached.contains(SURFACE_PREVIEW);
-                (panel_attached, commands, stick, settings_attached, preview_attached)
+                (panel_attached, draws, core.session.flow.is_some(), stick, settings_attached)
             };
             if panel_attached {
-                let _ = app.ctx.ui().notify(SURFACE_PANEL).await;
-                // 画布清单必须整发整换：宿主按清单指针判重缓存，图片首帧未就绪也不会自己重画，
-                // 每轮重发同一份才能保证副本落盘后缩略图补上来。
-                if !commands.is_empty() {
-                    let _ = app.ctx.submit_canvas(SURFACE_PANEL, views::ID_FLOW_CANVAS, commands).await;
+                if let Err(err) = app.ctx.ui().notify(SURFACE_PANEL).await {
+                    // 树没上屏，画布补交没有依托：基线作废，下一轮整份重建
+                    eprintln!("面板界面提交失败：{err}");
+                    app.core().session.canvas_base = Vec::new();
+                } else {
+                    // 画布按 id 增量维护：基线是宿主清单的当前内容（上次成功提交的绘制集）
+                    let mut base = std::mem::take(&mut app.core().session.canvas_base);
+                    if canvas_present {
+                        let (upsert, remove) = gallery::patch_plan(&base, &draws);
+                        let settled = (upsert.is_empty() && remove.is_empty())
+                            || app.ctx.patch_canvas(SURFACE_PANEL, views::ID_FLOW_CANVAS, upsert, remove).await.is_ok();
+                        if !settled {
+                            eprintln!("记录流画布增量提交失败：保持基线，下一轮重试");
+                        }
+                        base = if settled { draws } else { base };
+                    } else {
+                        // 画布不在树里：宿主已随树提交清掉清单，基线归空等下次重建
+                        base = Vec::new();
+                    }
+                    app.core().session.canvas_base = base;
                 }
                 // 新结果进来就贴底：滚动只能在提交完新树之后发，否则宿主看到的还是上一版的容器。
                 if stick {
@@ -273,9 +290,6 @@ impl App {
             }
             if settings_attached {
                 let _ = app.ctx.ui().notify(SURFACE_SETTINGS).await;
-            }
-            if preview_attached {
-                let _ = app.ctx.ui().notify(SURFACE_PREVIEW).await;
             }
         }
     }
@@ -291,10 +305,14 @@ impl App {
 
     async fn run_poll_cycle(self: &Arc<App>) {
         let (settings, http) = self.io_ctx();
+        // 探测态只在「不在连接态」时点亮：稳态轮询不打翻转「已连接/连接中」，状态条不闪。
         {
-            self.core().runtime.set_probing(true);
+            let mut core = self.core();
+            if core.runtime.snap.channel != Channel::Direct {
+                core.runtime.set_probing(true);
+                self.invalidate();
+            }
         }
-        self.invalidate();
         let channel = runtime::fetch_probe(&settings, &http).await;
         {
             let mut core = self.core();
@@ -560,7 +578,58 @@ impl App {
                 self.invalidate();
                 return;
             }
+            views::ID_PARAMS_CLOSE => {
+                self.core().session.params_open = false;
+                self.invalidate();
+                return;
+            }
+            views::ID_LB_CLOSE => {
+                self.core().session.lightbox_key = None;
+                self.invalidate();
+                return;
+            }
+            views::ID_LB_SAVE => {
+                let key = self.core().session.lightbox_key.clone();
+                if let Some(key) = key {
+                    self.archive_result(key).await;
+                }
+                return;
+            }
+            views::ID_LB_SAVE_AS => {
+                let key = self.core().session.lightbox_key.clone();
+                if let Some(key) = key {
+                    self.save_result_as(key).await;
+                }
+                return;
+            }
+            views::ID_LB_COPY => {
+                let prompt_id = {
+                    let core = self.core();
+                    core.session.lightbox_key.as_deref().and_then(|key| {
+                        core.runtime.snap.results.iter().find(|item| item.key == key).map(|item| item.prompt_id.clone())
+                    })
+                };
+                if let Some(prompt_id) = prompt_id {
+                    self.copy_prompt(&prompt_id).await;
+                }
+                return;
+            }
             _ => {}
+        }
+
+        // 浮层遮罩：点遮罩（内容之外）由宿主回发浮层节点点击，据此收起
+        if node_id == views::ID_PARAMS_OVERLAY || node_id == views::ID_LIGHTBOX {
+            if matches!(event, ViewEvent::Click) {
+                let mut core = self.core();
+                if node_id == views::ID_PARAMS_OVERLAY {
+                    core.session.params_open = false;
+                } else {
+                    core.session.lightbox_key = None;
+                }
+                drop(core);
+                self.invalidate();
+            }
+            return;
         }
 
         if node_id == views::ID_WF {
@@ -711,13 +780,7 @@ impl App {
         };
         let Some(hit) = hit else { return };
         if let Some(key) = hit.strip_prefix(gallery::HIT_PREVIEW) {
-            self.open_preview(key.to_string()).await;
-        } else if let Some(key) = hit.strip_prefix(gallery::HIT_SAVE) {
-            self.archive_result(key.to_string()).await;
-        } else if let Some(key) = hit.strip_prefix(gallery::HIT_SAVE_AS) {
-            self.save_result_as(key.to_string()).await;
-        } else if let Some(id) = hit.strip_prefix(gallery::HIT_COPY) {
-            self.copy_prompt(id).await;
+            self.open_lightbox(key.to_string()).await;
         } else if hit == gallery::HIT_MORE {
             self.core().session.shown_batches += FLOW_BATCH_STEP;
             self.invalidate();
@@ -815,7 +878,6 @@ impl App {
                 (views::SET_PYTHON, ViewEvent::Change { value }) => core.settings.python_path = text_value(value).as_str().unwrap_or("").to_string(),
                 (views::SET_EXTRA, ViewEvent::Change { value }) => core.settings.extra_args = text_value(value).as_str().unwrap_or("").to_string(),
                 (views::SET_ARCHIVE, ViewEvent::Change { value }) => core.settings.archive_folder = text_value(value).as_str().unwrap_or("").to_string(),
-                (views::SET_AUTO, ViewEvent::Change { value: EventValue::Bool(on) }) => core.settings.auto_start = *on,
                 _ => {}
             }
         }
@@ -973,7 +1035,7 @@ impl App {
     }
 
     /// 载入下拉选中项：读文件并归一化成可提交 prompt，草稿与随机字段重置。
-    async fn select_workflow(self: &Arc<App>, index: i64) {
+    pub(crate) async fn select_workflow(self: &Arc<App>, index: i64) {
         let file = {
             let core = self.core();
             core.runtime.snap.workflows.get(index.max(0) as usize).cloned()
@@ -1001,6 +1063,18 @@ impl App {
             }
             Err(err) => self.set_error(err),
         }
+    }
+
+    /// 按路径选中并载入工作流（AI 工具用：名称匹配在锁外做，路径比下拉下标稳定）。
+    /// 返回 false 表示清单里已无该文件或载入失败（原因已由界面错误横幅给出）。
+    pub(crate) async fn select_workflow_by_path(self: &Arc<App>, path: &str) -> bool {
+        let index = {
+            let core = self.core();
+            core.runtime.snap.workflows.iter().position(|f| f.path == path)
+        };
+        let Some(index) = index else { return false };
+        self.select_workflow(index as i64).await;
+        self.core().session.workflow_id.as_deref() == Some(path)
     }
 
     /// 把当前草稿写回所属工作流文件；保存后刷新其 mtime 以免误报外部改动。
@@ -1078,23 +1152,34 @@ impl App {
         }
     }
 
-    /// 落库：本地副本优先读字节，缺则回源；经宿主仓库写面写进落库目录，成功后记录相对路径。
+    /// 落库：本地副本就绪时经私有目录按路径导入（无载荷上限），缺副本才回源取字节走二进制写面。
     async fn archive_result(self: &Arc<App>, key: String) {
-        let (settings, http, item, folder) = {
+        let (settings, http, item, folder, local) = {
             let core = self.core();
             match core.runtime.snap.results.iter().find(|r| r.key == key).cloned() {
-                Some(item) => (core.settings.clone(), self.http.clone(), item, core.settings.archive_folder.clone()),
+                Some(item) => {
+                    let local = item.local.clone();
+                    (core.settings.clone(), self.http.clone(), item, core.settings.archive_folder.clone(), local)
+                }
                 None => return,
             }
         };
-        let bytes = match read_result_bytes(&self.store, &settings, &http, &item).await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                self.set_error(err);
-                return;
+        let saved = match local.as_deref() {
+            Some(local) => {
+                crate::archive::save_from_private(&self.ctx, &folder, &item.image_ref, &self.store.abs_path(local)).await
+            }
+            None => {
+                let bytes = match read_result_bytes(&self.store, &settings, &http, &item).await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        self.set_error(err);
+                        return;
+                    }
+                };
+                crate::archive::save(&self.ctx, &folder, &item.image_ref, &bytes).await
             }
         };
-        match crate::archive::save(&self.ctx, &folder, &item.image_ref, &bytes).await {
+        match saved {
             Ok(relative) => {
                 self.core().runtime.mark_saved(&key, relative.clone());
                 self.invalidate();
@@ -1142,37 +1227,18 @@ impl App {
         }
     }
 
-    /// 打开/复用大图预览窗口：窗口面固定一个 id，再次点击只切换展示条目。
-    async fn open_preview(self: &Arc<App>, key: String) {
-        let has_copy = {
+    /// 打开记录流灯箱：面内浮层大图（与表格编辑器图片字段同一种交互），存档/另存/复制都在灯箱里。
+    async fn open_lightbox(self: &Arc<App>, key: String) {
+        let ready = {
             let core = self.core();
             core.runtime.snap.results.iter().any(|r| r.key == key && r.local.is_some())
         };
-        if !has_copy {
+        if !ready {
             self.set_error("副本未就绪，无法预览".to_string());
             return;
         }
-        // 先记条目再开窗：宿主的挂载通知可能早于开窗回执到达，此时树已能取到正确条目。
-        self.core().session.preview_key = Some(key);
+        self.core().session.lightbox_key = Some(key);
         self.invalidate();
-        if self.core().attached.contains(SURFACE_PREVIEW) {
-            return;
-        }
-        let params = WindowOpenParams {
-            id: SURFACE_PREVIEW.to_string(),
-            title: "ComfyUI 结果预览".to_string(),
-            width: Some(900.0),
-            height: Some(700.0),
-            always_on_top: None,
-            skip_taskbar: None,
-            hide_on_blur: None,
-        };
-        if let Err(err) = self.ctx.window_open(params).await {
-            // 连点竞态：两次点击都判定未挂载，后到的一次被宿主按重复 id 拒绝——窗口确实已在，忽略即可。
-            if !self.core().attached.contains(SURFACE_PREVIEW) {
-                self.set_error(format!("打开预览窗口失败：{err}"));
-            }
-        }
     }
 
     /// 上传用户选定的本地图片到 ComfyUI，写进对应节点的 image 输入。
@@ -1247,10 +1313,7 @@ impl App {
     // ---------- 挂载 / 仓库事件 ----------
 
     pub fn on_surface_attached(self: &Arc<App>, params: SurfaceAttachedParams) {
-        // 预览窗口只认 `window.open` 后随附的 Window 面，避免与同名贡献面混淆。
-        let known = params.surface_id == SURFACE_PANEL
-            || params.surface_id == SURFACE_SETTINGS
-            || (params.surface_id == SURFACE_PREVIEW && params.kind == SurfaceKind::Window);
+        let known = params.surface_id == SURFACE_PANEL || params.surface_id == SURFACE_SETTINGS;
         if !known {
             return;
         }
@@ -1308,11 +1371,26 @@ fn flow_input(core: &Core) -> gallery::FlowInput {
     let records = gallery::records_of(&snap.results);
     let shown = core.session.shown_batches.max(1);
     let hidden = records.len().saturating_sub(shown);
+    // 占位格规格跟用户当前选中的比例与张数走（生成坞三段同一判定）；面板还没载工作流时按队首任务推导。
+    let spec = {
+        let has_draft = core.session.draft.as_object().map(|map| !map.is_empty()).unwrap_or(false);
+        if has_draft {
+            let fields = runtime::build_fields_for(&core.session.draft, snap);
+            gallery::running_spec(&core.session.draft, &fields)
+        } else {
+            let lead = snap.queue_running.first().or(snap.queue_pending.first());
+            let prompt = lead.and_then(crate::comfy::types::queue_item_prompt).cloned().unwrap_or(Value::Null);
+            let fields = runtime::build_fields_for(&prompt, snap);
+            gallery::running_spec(&prompt, &fields)
+        }
+    };
+    let progress = snap.progress.as_ref();
     let running = gallery::running_block(
         &snap.queue_running,
         &snap.queue_pending,
-        snap.progress.as_ref().map(|progress| progress.fraction() * 100.0),
-        |prompt| runtime::build_fields_for(prompt, snap),
+        progress.map(|progress| progress.fraction() * 100.0),
+        progress.map(|progress| format!("{:.0}/{:.0}", progress.value, progress.max)),
+        spec,
     );
     gallery::FlowInput {
         width: core.session.gallery_width,
@@ -1412,9 +1490,6 @@ mod tests {
     fn canvas_hit_ids_are_not_field_prefixes() {
         for id in [
             format!("{}k", gallery::HIT_PREVIEW),
-            format!("{}k", gallery::HIT_SAVE),
-            format!("{}k", gallery::HIT_SAVE_AS),
-            format!("{}k", gallery::HIT_COPY),
             gallery::HIT_MORE.to_string(),
             gallery::HIT_INTERRUPT.to_string(),
         ] {

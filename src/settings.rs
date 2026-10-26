@@ -29,8 +29,6 @@ pub struct ComfySettings {
     pub python_path: String,
     /// 附加启动参数，原样追加在末尾。
     pub extra_args: String,
-    /// 随插件装载自动托管启动（仅托管模式生效）。
-    pub auto_start: bool,
     /// 落库子目录（相对仓库根），留空则用仓库根下的 `comfyui/`。
     pub archive_folder: String,
 }
@@ -44,7 +42,6 @@ impl Default for ComfySettings {
             comfy_dir: String::new(),
             python_path: String::new(),
             extra_args: String::new(),
-            auto_start: false,
             archive_folder: String::new(),
         }
     }
@@ -57,7 +54,6 @@ pub fn from_value(raw: Option<&Value>) -> ComfySettings {
         return default;
     };
     let string = |key: &str| map.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-    let boolean = |key: &str, fallback: bool| map.get(key).and_then(Value::as_bool).unwrap_or(fallback);
     let port = map
         .get("port")
         .and_then(Value::as_u64)
@@ -79,7 +75,6 @@ pub fn from_value(raw: Option<&Value>) -> ComfySettings {
         comfy_dir: string("comfyDir"),
         python_path: string("pythonPath"),
         extra_args: string("extraArgs"),
-        auto_start: boolean("autoStart", default.auto_start),
         archive_folder: string("archiveFolder"),
     }
 }
@@ -114,10 +109,9 @@ mod tests {
 
     #[test]
     fn missing_and_dirty_fields_fall_back() {
-        let s = from_value(Some(&json!({ "port": 70000, "host": "  ", "autoStart": "yes" })));
+        let s = from_value(Some(&json!({ "port": 70000, "host": "  " })));
         assert_eq!(s.port, 8188, "越界端口回落默认");
         assert_eq!(s.host, "127.0.0.1", "空白 host 回落默认");
-        assert!(!s.auto_start, "错类型布尔回落默认");
     }
 
     #[test]

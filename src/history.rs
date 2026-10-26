@@ -40,6 +40,8 @@ pub struct ResultImage {
     pub saved_path: Option<String>,
     /// 本地副本相对私有目录的路径（`history/{name}`）；抓取成功后写入，缺省表示尚未就绪或抓取失败。
     pub local: Option<String>,
+    /// 原图片素尺寸（副本字节落盘时解析文件头）：画廊格高按它算；缺省（未抓到/旧记录）按方格。
+    pub pixel: Option<(u32, u32)>,
     /// 已补抓的轮数；达到 [`RECAPTURE_ATTEMPTS`] 后不再进入补抓批次。
     pub copy_attempts: u32,
 }
@@ -109,6 +111,120 @@ pub fn ref_path(name: &str) -> String {
     format!("{REF_DIR}/{name}")
 }
 
+/// 图片的固有像素尺寸（PNG / JPEG / GIF / BMP / WebP 文件头）；认不出返回 `None`。
+/// 副本字节落盘时解析进 `ResultImage::pixel`（画廊格高按它算），只看文件头不解码像素。
+pub fn image_size(header: &[u8]) -> Option<(u32, u32)> {
+    let (w, h) = png_size(header)
+        .or_else(|| gif_size(header))
+        .or_else(|| bmp_size(header))
+        .or_else(|| webp_size(header))
+        .or_else(|| jpeg_size(header))?;
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// PNG：8 字节签名后是 IHDR，宽高各 4 字节大端（偏移 16 / 20）。
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let signature = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if !bytes.starts_with(&signature) {
+        return None;
+    }
+    Some((be_u32(bytes, 16)?, be_u32(bytes, 20)?))
+}
+
+/// GIF：`GIF87a` / `GIF89a` 后是逻辑屏幕宽高，各 2 字节小端（偏移 6 / 8）。
+fn gif_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !bytes.starts_with(b"GIF87a") && !bytes.starts_with(b"GIF89a") {
+        return None;
+    }
+    Some((u32::from(le_u16(bytes, 6)?), u32::from(le_u16(bytes, 8)?)))
+}
+
+/// BMP：`BM` 后 DIB 头，宽高各 4 字节小端（偏移 18 / 22；高度为负表示自上而下存储，取绝对值）。
+fn bmp_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !bytes.starts_with(b"BM") {
+        return None;
+    }
+    let width = le_u32(bytes, 18)?;
+    let height = le_u32(bytes, 22).map(|value| value as i32).map(i32::unsigned_abs)?;
+    Some((width, height))
+}
+
+/// WebP：`RIFF` + 尺寸 + `WEBP`，之后按块定尺寸——VP8X 扩展块带 24 位画布尺寸，
+/// VP8 无损块把 14 位宽高打包进 4 字节，VP8 有损块在帧头后各 2 字节（14 位有效）。
+fn webp_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 16 || !bytes.starts_with(b"RIFF") || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    match &bytes[12..16] {
+        b"VP8X" if bytes.len() >= 30 => {
+            let w = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]) + 1;
+            let h = u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]) + 1;
+            Some((w, h))
+        }
+        b"VP8L" if bytes.len() >= 25 => {
+            let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        b"VP8 " if bytes.len() >= 30 => {
+            // 帧头 3 字节 + 同步码 3 字节后是 16 位宽高（各 14 位有效）
+            let w = u32::from(u16::from_le_bytes([bytes[26], bytes[27]])) & 0x3fff;
+            let h = u32::from(u16::from_le_bytes([bytes[28], bytes[29]])) & 0x3fff;
+            Some((w, h))
+        }
+        _ => None,
+    }
+}
+
+/// JPEG：逐段扫描到 SOF0–SOF15（帧头），其中高 4 字节起是宽高各 2 字节大端。
+/// 段长自描述，遇 SOS（扫描数据）即止；不展开 EXIF 等大段。
+fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    let mut at = 2;
+    while at + 4 <= bytes.len() {
+        if bytes[at] != 0xff {
+            at += 1; // 填充字节：跳过
+            continue;
+        }
+        let marker = bytes[at + 1];
+        match marker {
+            0xd8 | 0x01 | 0xd0..=0xd7 => at += 2, // 无载荷标记
+            0xda => return None,                  // SOS：像素数据开始，找不到帧头
+            0xc0..=0xcf if marker != 0xc4 && marker != 0xc8 && marker != 0xcc => {
+                // SOF（排除 JPG 与 DAC 两个非帧标记）：段长 2 字节 + 精度 1 + 高 2 + 宽 2
+                let h = be_u16(bytes, at + 5)?;
+                let w = be_u16(bytes, at + 7)?;
+                return Some((u32::from(w), u32::from(h)));
+            }
+            _ => {
+                let len = be_u16(bytes, at + 2)? as usize;
+                if len < 2 {
+                    return None;
+                }
+                at += 2 + len;
+            }
+        }
+    }
+    None
+}
+
+fn be_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    bytes.get(at..at + 2).map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+}
+
+fn be_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    bytes.get(at..at + 4).and_then(|quad| quad.try_into().ok()).map(u32::from_be_bytes)
+}
+
+fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    bytes.get(at..at + 2).map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    bytes.get(at..at + 4).and_then(|quad| quad.try_into().ok()).map(u32::from_le_bytes)
+}
+
 /// 参考图缩略副本缓存：`input 文件名 → 私有目录相对路径`，按入库先后排队、超上限淘汰最旧。
 /// 淘汰只交出路径，删除动作由调用方经 [`CopyStore::remove`] 执行，删除范围不出私有目录。
 #[derive(Default)]
@@ -162,6 +278,11 @@ impl CopyStore {
 
     fn abs(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
+    }
+
+    /// 副本的绝对路径：宿主仓库导入面（`vault.importFile`）只收私有目录内的绝对路径。
+    pub fn abs_path(&self, relative: &str) -> PathBuf {
+        self.abs(relative)
     }
 
     pub fn save(&self, relative: &str, bytes: &[u8]) -> Result<(), String> {
@@ -251,5 +372,85 @@ mod tests {
         assert_eq!(cache.entries.len(), REF_LIMIT);
         assert_eq!(cache.get("0.png"), None);
         assert!(cache.get(&format!("{REF_LIMIT}.png")).is_some());
+    }
+
+    #[test]
+    fn image_size_reads_common_container_headers() {
+        // PNG：IHDR 宽高（大端）
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]); // IHDR 长
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1024u32.to_be_bytes());
+        png.extend_from_slice(&768u32.to_be_bytes());
+        assert_eq!(image_size(&png), Some((1024, 768)));
+
+        // GIF：逻辑屏幕宽高（小端）
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&640u16.to_le_bytes());
+        gif.extend_from_slice(&480u16.to_le_bytes());
+        assert_eq!(image_size(&gif), Some((640, 480)));
+
+        // BMP：DIB 头宽高（小端，负高度取绝对值）
+        let mut bmp = b"BM".to_vec();
+        bmp.extend_from_slice(&[0; 16]);
+        bmp.extend_from_slice(&800i32.to_le_bytes());
+        bmp.extend_from_slice(&(-600i32).to_le_bytes());
+        assert_eq!(image_size(&bmp), Some((800, 600)));
+
+        // WebP 三种块形态
+        let mut vp8x = b"RIFF".to_vec();
+        vp8x.extend_from_slice(&[0; 4]);
+        vp8x.extend_from_slice(b"WEBPVP8X");
+        vp8x.extend_from_slice(&[0; 4]);
+        vp8x.extend_from_slice(&[0; 4]); // 标志位 + 保留字段
+        vp8x.extend_from_slice(&999u32.to_le_bytes()[..3]);
+        vp8x.extend_from_slice(&499u32.to_le_bytes()[..3]);
+        assert_eq!(image_size(&vp8x), Some((1000, 500)), "VP8X 画布尺寸各 +1");
+
+        let mut vp8l = b"RIFF".to_vec();
+        vp8l.extend_from_slice(&[0; 4]);
+        vp8l.extend_from_slice(b"WEBPVP8L");
+        vp8l.extend_from_slice(&[0; 4]);
+        vp8l.push(0x2f);
+        let packed = (511u32) | (511u32 << 14);
+        vp8l.extend_from_slice(&packed.to_le_bytes());
+        assert_eq!(image_size(&vp8l), Some((512, 512)), "VP8L 14 位宽高各 +1");
+
+        let mut vp8 = b"RIFF".to_vec();
+        vp8.extend_from_slice(&[0; 4]);
+        vp8.extend_from_slice(b"WEBPVP8 ");
+        vp8.extend_from_slice(&[0; 4]);
+        vp8.extend_from_slice(&[0; 3]); // 帧标签
+        vp8.extend_from_slice(&[0x9d, 0x01, 0x2a]); // 同步码
+        vp8.extend_from_slice(&320u16.to_le_bytes());
+        vp8.extend_from_slice(&240u16.to_le_bytes());
+        assert_eq!(image_size(&vp8), Some((320, 240)));
+    }
+
+    #[test]
+    fn image_size_scans_jpeg_segments() {
+        // SOI + APP0(JFIF) + SOF0 + 之后的数据：须跳过 APP 段读到帧头
+        let mut jpeg = vec![0xff, 0xd8];
+        jpeg.extend_from_slice(&[0xff, 0xe0, 0x00, 0x06]); // APP0 段长 6
+        jpeg.extend_from_slice(b"JFIF\0");
+        jpeg.extend_from_slice(&[0xff, 0xc0, 0x00, 0x11, 0x08]); // SOF0：精度 8
+        jpeg.extend_from_slice(&1080u16.to_be_bytes());
+        jpeg.extend_from_slice(&1920u16.to_be_bytes());
+        jpeg.extend_from_slice(&[0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        jpeg.extend_from_slice(&[0xff, 0xda, 0x00, 0x08]); // SOS
+        assert_eq!(image_size(&jpeg), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn image_size_rejects_unknown_and_truncated() {
+        assert_eq!(image_size(b"not an image at all"), None);
+        assert_eq!(image_size(&[]), None);
+        assert_eq!(image_size(&[0x89, b'P', b'N', b'G']), None, "签名不全");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&0u32.to_be_bytes());
+        png.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(image_size(&png), None, "零尺寸按认不出处理");
     }
 }

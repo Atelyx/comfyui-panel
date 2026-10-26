@@ -1,7 +1,10 @@
 //! 结果落库：把图片字节写进当前仓库的落库目录。
 //!
-//! 写入经宿主 `vault` 能力面的二进制写面，与宿主自身的写盘 / 协作广播同一出口；
+//! 两条写入路径：本地副本就绪时经宿主 `vault` 导入面按路径复制（字节不进 RPC，本地仓库无大小
+//! 上限、协作空间上限也高于二进制写面）；副本缺失时回源取字节走二进制写面（受单次载荷上限约束）。
 //! 本地仓库与协作空间同构，插件不感知容器类型。落库目录、文件名与重名避让都在这里定口径。
+
+use std::path::Path;
 
 use atelyx_plugin_sdk::Context;
 
@@ -113,6 +116,29 @@ pub async fn save(ctx: &Context, archive_folder: &str, image_ref: &ImageRef, byt
             continue;
         }
         ctx.vault_write_binary(&relative, bytes).await.map_err(|e| format!("写入仓库失败：{e}"))?;
+        return Ok(relative);
+    }
+    Err(format!("同名文件过多，无法在 {folder} 下生成新文件名"))
+}
+
+/// 经私有目录导入落库：源是插件私有目录里的副本文件（绝对路径），字节由宿主直接搬运，
+/// 不受二进制写面的载荷上限约束。查重与重名避让口径同 [`save`]；导入是复制语义，源文件保留。
+pub async fn save_from_private(
+    ctx: &Context,
+    archive_folder: &str,
+    image_ref: &ImageRef,
+    source: &Path,
+) -> Result<String, String> {
+    let folder = folder_of(archive_folder);
+    let name = archive_name(&image_ref.filename);
+    for attempt in 0..MAX_NAME_ATTEMPTS {
+        let relative = format!("{folder}/{}", numbered_name(&name, attempt));
+        let exists = ctx.vault_exists(&relative).await.map_err(|e| format!("检查仓库文件失败：{e}"))?;
+        if exists {
+            continue;
+        }
+        let source = source.to_string_lossy().into_owned();
+        ctx.vault_import_file(&relative, &source).await.map_err(|e| format!("导入仓库失败：{e}"))?;
         return Ok(relative);
     }
     Err(format!("同名文件过多，无法在 {folder} 下生成新文件名"))

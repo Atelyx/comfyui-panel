@@ -4,6 +4,7 @@
 //! `surface.attached` 一定能取到 App）；其余通知一律「取不到 App 就跳过」，容忍早于 ready 的情形。
 
 mod app;
+mod agent;
 mod archive;
 mod clipboard;
 mod comfy;
@@ -20,7 +21,7 @@ use std::sync::OnceLock;
 
 use atelyx_plugin_sdk::protocol::method::{
     CanvasResizedParams, ProcessEventParams, SurfaceAttachedParams, SurfaceDetachedParams,
-    ViewEventParams,
+    ToolCallParams, ViewEventParams,
 };
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 
@@ -73,6 +74,15 @@ impl PluginHandler for Handler {
     async fn on_canvas_resized(&self, _ctx: &Context, params: CanvasResizedParams) {
         if let Some(app) = self.app() {
             app.on_canvas_resized(params);
+        }
+    }
+
+    async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
+        // 工具调用只可能来自已注册的本插件工具，正常路径 App 一定在；仍未就绪时按未处理回报。
+        if let Some(app) = self.app() {
+            agent::on_tool_call(app, params).await;
+        } else {
+            let _ = ctx.tool_result(&params.call_id, "插件尚未就绪", true).await;
         }
     }
 }

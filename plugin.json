@@ -1,13 +1,13 @@
 {
   "id": "com.atelyx.comfyui-panel",
   "name": "ComfyUI",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "apiVersion": 1,
   "entry": {
     "windows": "comfyui-panel.exe",
     "linux": "comfyui-panel"
   },
-  "permissions": ["process", "state", "notification", "dialog", "fs", "vault", "clipboard", "window"],
+  "permissions": ["process", "state", "notification", "dialog", "fs", "vault", "clipboard", "ai"],
   "singleton": true,
   "keepMountedOnVaultSwitch": true
 }

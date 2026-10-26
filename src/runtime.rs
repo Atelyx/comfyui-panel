@@ -424,12 +424,14 @@ pub fn socket_url(settings: &ComfySettings, client_id: &str, http: &reqwest::Cli
     client_for(settings, http).socket_url(client_id)
 }
 
-/// 立即抓取新结果的字节副本并回填 `local`（预览节点输出会随服务重启消失，须当场落盘）。
+/// 立即抓取新结果的字节副本并回填 `local` 与 `pixel`（预览节点输出会随服务重启消失，须当场落盘；
+/// 像素尺寸从同一份字节解析，画廊格高按它算）。
 pub async fn capture_copies(fresh: &mut [ResultImage], settings: &ComfySettings, http: &reqwest::Client, store: &CopyStore) {
     let client = client_for(settings, http);
     for (index, item) in fresh.iter_mut().enumerate() {
         let path = copy_path(&copy_name(&item.prompt_id, index, &item.image_ref.filename));
         if let Ok(bytes) = client.image_bytes(&item.image_ref).await {
+            item.pixel = crate::history::image_size(&bytes);
             if store.save(&path, &bytes).is_ok() {
                 item.local = Some(path);
             }
@@ -444,6 +446,7 @@ pub async fn recapture_copies(pending: &mut [ResultImage], settings: &ComfySetti
     for item in pending.iter_mut() {
         let path = copy_path(&retry_copy_name(&item.prompt_id, &item.image_ref.filename));
         if let Ok(bytes) = client.image_bytes(&item.image_ref).await {
+            item.pixel = crate::history::image_size(&bytes);
             if store.save(&path, &bytes).is_ok() {
                 item.local = Some(path);
             }
@@ -499,6 +502,7 @@ fn images_of(prompt_id: &str, entry: &Value, submitted_title: &str) -> Vec<Resul
                 failed,
                 saved_path: None,
                 local: None,
+                pixel: None,
                 copy_attempts: 0,
             });
         }

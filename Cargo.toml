@@ -1,6 +1,6 @@
 [package]
 name = "comfyui-panel"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.85"
 description = "Atelyx 的 ComfyUI 原生插件：直连本机 ComfyUI，挑工作流、调参、排队生成、看实时进度，并把结果存进当前仓库；托管启停 ComfyUI 进程"
