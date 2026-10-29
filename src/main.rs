@@ -1,4 +1,4 @@
-//! 插件入口：握手、注册界面树与常驻任务装配，再把宿主通知转交 App。
+//! 插件入口：握手、注册贡献点与常驻任务装配，再把宿主通知转交 App。
 //!
 //! 生命周期严格单向：`on_ready` 建 App 并落到 `OnceLock`（先于注册贡献点，保证随后到达的
 //! `surface.attached` 一定能取到 App）；其余通知一律「取不到 App 就跳过」，容忍早于 ready 的情形。
@@ -14,14 +14,15 @@ mod history;
 mod launcher;
 mod runtime;
 mod settings;
+mod ui;
 mod views;
 mod workflow;
 
 use std::sync::OnceLock;
 
+use atelyx_plugin_protocol::frame::FrameInputParams;
 use atelyx_plugin_sdk::protocol::method::{
-    CanvasResizedParams, ProcessEventParams, SurfaceAttachedParams, SurfaceDetachedParams,
-    ToolCallParams, ViewEventParams,
+    ProcessEventParams, SurfaceAttachedParams, SurfaceDetachedParams, ToolCallParams,
 };
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 
@@ -47,15 +48,16 @@ impl PluginHandler for Handler {
         app.after_ready().await;
     }
 
-    async fn on_view_event(&self, _ctx: &Context, params: ViewEventParams) {
+    /// 面帧输入：SDK 逐条串行回调，同一面的输入按到达顺序就地处理并重提一帧。
+    async fn on_frame_input(&self, _ctx: &Context, params: FrameInputParams) {
         if let Some(app) = self.app() {
-            app.on_view_event(params).await;
+            ui::handle_frame_input(app, params).await;
         }
     }
 
     async fn on_surface_attached(&self, _ctx: &Context, params: SurfaceAttachedParams) {
         if let Some(app) = self.app() {
-            app.on_surface_attached(params);
+            app.on_surface_attached(params).await;
         }
     }
 
@@ -68,12 +70,6 @@ impl PluginHandler for Handler {
     async fn on_process_event(&self, _ctx: &Context, params: ProcessEventParams) {
         if let Some(app) = self.app() {
             controller::on_process_event(app, params).await;
-        }
-    }
-
-    async fn on_canvas_resized(&self, _ctx: &Context, params: CanvasResizedParams) {
-        if let Some(app) = self.app() {
-            app.on_canvas_resized(params);
         }
     }
 

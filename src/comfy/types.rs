@@ -130,6 +130,19 @@ pub fn history_outputs(entry: &Value) -> Option<&Value> {
     entry.get("outputs")
 }
 
+/// 系统统计里第一块有显存的设备的（剩余, 总量），单位字节；CPU 设备与无数据返回 `None`。
+pub fn vram_of(stats: Option<&Value>) -> Option<(f64, f64)> {
+    let devices = stats?.get("devices")?.as_array()?;
+    for device in devices {
+        let total = device.get("vram_total").and_then(Value::as_f64).unwrap_or(0.0);
+        let free = device.get("vram_free").and_then(Value::as_f64).unwrap_or(0.0);
+        if total > 0.0 {
+            return Some((free, total));
+        }
+    }
+    None
+}
+
 /// 历史条目是否标记为出错（`status.status_str == "error"`）。
 pub fn history_failed(entry: &Value) -> bool {
     entry
@@ -154,4 +167,27 @@ pub fn output_refs(output: &Value) -> Vec<ImageRef> {
         }
     }
     refs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 显存取第一块有显存的设备：CPU 设备（vram_total 为 0）跳过，无数据返回 None。
+    #[test]
+    fn vram_picks_first_device_with_memory() {
+        let stats = json!({
+            "devices": [
+                {"name": "cpu", "type": "cpu", "vram_total": 0, "vram_free": 0},
+                {"name": "cuda:0", "type": "cuda", "vram_total": 25769803776.0, "vram_free": 5583457484.8},
+            ],
+        });
+        let (free, total) = vram_of(Some(&stats)).unwrap();
+        assert_eq!(total, 25769803776.0);
+        assert_eq!(free, 5583457484.8);
+        assert_eq!(vram_of(Some(&json!({"devices": []}))), None);
+        assert_eq!(vram_of(Some(&json!({"devices": [{"name": "cpu", "vram_total": 0}]}))), None);
+        assert_eq!(vram_of(None), None);
+    }
 }
