@@ -599,7 +599,7 @@ pub fn paint(canvas: &mut Canvas<'_, '_>, layout: &FlowLayout) {
 
 fn paint_command(canvas: &mut Canvas<'_, '_>, command: &DrawCommand, dx: f32, dy: f32, visible: atelyx_plugin_sdk::frame_ui::Rect) {
     match command {
-        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius } => {
+        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius, shadow: _ } => {
             let rect = atelyx_plugin_sdk::frame_ui::Rect::new(x + dx, y + dy, *w, *h).intersect(visible);
             if rect.is_empty() {
                 return;
@@ -613,6 +613,7 @@ fn paint_command(canvas: &mut Canvas<'_, '_>, command: &DrawCommand, dx: f32, dy
                 stroke: *stroke,
                 stroke_width: *stroke_width,
                 corner_radius: *corner_radius,
+                shadow: None,
             });
         }
         DrawCommand::Image { source, x, y, w, h, fit } => {
@@ -630,7 +631,20 @@ fn paint_command(canvas: &mut Canvas<'_, '_>, command: &DrawCommand, dx: f32, dy
                 fit: *fit,
             });
         }
-        DrawCommand::Text { x, y, content, size, color, weight, family, max_width, align } => {
+        DrawCommand::Text {
+            x,
+            y,
+            content,
+            size,
+            color,
+            weight,
+            family,
+            italic,
+            max_width,
+            align,
+            family_name,
+            layout,
+        } => {
             let width = content.chars().map(|c| if is_wide(c) { *size } else { *size * 0.55 }).sum::<f32>();
             let rect = atelyx_plugin_sdk::frame_ui::Rect::new(x + dx, y + dy, width, size * 1.2);
             if !rect_inside(rect, visible) {
@@ -644,8 +658,11 @@ fn paint_command(canvas: &mut Canvas<'_, '_>, command: &DrawCommand, dx: f32, dy
                 color: *color,
                 weight: *weight,
                 family: *family,
+                italic: *italic,
                 max_width: *max_width,
                 align: *align,
+                family_name: family_name.clone(),
+                layout: *layout,
             });
         }
         other => {
@@ -746,11 +763,11 @@ fn token(value: ColorToken) -> PaintColor {
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, fill: Option<PaintColor>, stroke: Option<PaintColor>) -> DrawCommand {
-    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: None }
+    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: None, shadow: None }
 }
 
 fn rounded(x: f32, y: f32, w: f32, h: f32, fill: Option<PaintColor>, stroke: Option<PaintColor>, radius: f32) -> DrawCommand {
-    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: Some(1.0), corner_radius: Some(radius) }
+    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: Some(1.0), corner_radius: Some(radius), shadow: None }
 }
 
 fn card(width: f32, top: f32, height: f32) -> DrawCommand {
@@ -766,8 +783,11 @@ fn text(x: f32, y: f32, content: &str, size: f32, color: PaintColor, weight: Opt
         color,
         weight,
         family: None,
+        italic: false,
         max_width: None,
         align: None,
+        family_name: None,
+        layout: None,
     }
 }
 
