@@ -76,6 +76,7 @@ pub async fn start(app: &std::sync::Arc<App>) -> bool {
         Ok(triple) => triple,
         // 解析失败已在锁内写入 error，此处只补一次通知（不占位，无需回滚 starting）。
         Err(err) => {
+            app.ctx.log_error(&format!("ComfyUI 启动失败：{err}"));
             app.notify(NotificationLevel::Error, "ComfyUI 启动失败", Some(&err));
             return false;
         }
@@ -97,7 +98,9 @@ pub async fn start(app: &std::sync::Arc<App>) -> bool {
             if cancelled {
                 // 等待 pid 落地期间用户已点取消：立刻回收，不留游离进程，并复位占位旗标
                 // （取消期间 starting 保持占位，杜绝收场前再次启动拉起第二个进程）。
-                let _ = app.ctx.kill(pid).await;
+                if let Err(err) = app.ctx.kill(pid).await {
+                    app.ctx.log_error(&format!("取消启动时结束进程 {pid} 失败：{err}"));
+                }
                 let mut core = app.core();
                 core.host.starting = false;
                 core.host.pid = None;
@@ -114,6 +117,7 @@ pub async fn start(app: &std::sync::Arc<App>) -> bool {
             app.invalidate();
         }
         Err(err) => {
+            app.ctx.log_error(&format!("拉起 ComfyUI 进程失败：{err}"));
             fail_start(app, err.to_string());
             return false;
         }
@@ -130,7 +134,9 @@ pub async fn start(app: &std::sync::Arc<App>) -> bool {
         // 超时未就绪而进程仍在：回收它，否则 pid 卡在原地，用户只能先停止再启动。
         if died.is_empty() && !cancelled {
             if let Some(pid) = pid {
-                let _ = app.ctx.kill(pid).await;
+                if let Err(err) = app.ctx.kill(pid).await {
+                    app.ctx.log_error(&format!("未就绪超时后结束进程 {pid} 失败：{err}"));
+                }
             }
         }
         fail_start(app, died);
@@ -194,6 +200,7 @@ pub async fn stop(app: &std::sync::Arc<App>) {
         return;
     };
     if let Err(err) = app.ctx.kill(pid).await {
+        app.ctx.log_error(&format!("结束 ComfyUI 进程 {pid} 失败：{err}"));
         app.core().host.error = err.to_string();
     }
     // 回收后落定状态；随后到达的 Terminated 事件因 pid 已清空被忽略。
@@ -227,6 +234,7 @@ fn fail_start(app: &std::sync::Arc<App>, message: String) {
     let should_notify = !core.host.notified;
     core.host.notified = true;
     drop(core);
+    app.ctx.log_error(&format!("ComfyUI 启动失败：{message}"));
     app.invalidate();
     if should_notify {
         app.notify(NotificationLevel::Error, "ComfyUI 启动失败", Some(&message));
@@ -266,6 +274,7 @@ pub async fn on_process_event(app: &std::sync::Arc<App>, params: ProcessEventPar
             };
             app.invalidate();
             if !starting {
+                app.ctx.log_error(&format!("ComfyUI 进程已退出：{message}"));
                 app.notify(NotificationLevel::Error, "ComfyUI 进程已退出", Some(&message));
             }
         }

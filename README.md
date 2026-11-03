@@ -1,8 +1,8 @@
 # ComfyUI
 
-Atelyx 原生插件（Rust 编译为平台可执行文件，经 stdio 上的 JSON-RPC 与宿主通信）：在 Atelyx 里选工作流、调参数、排队生成、看实时进度，并把结果存进当前仓库。需要节点级编排时，一键在系统浏览器打开 ComfyUI 原生界面。
+Atelyx 原生插件（Rust 编译为 cdylib 动态库，由宿主同进程按 C ABI v1 加载）：在 Atelyx 里选工作流、调参数、排队生成、看实时进度，并把结果存进当前仓库。需要节点级编排时，一键在系统浏览器打开 ComfyUI 原生界面。
 
-> 要求 Atelyx 0.6.3 及以上（插件界面经整面帧绘制，控件层随插件 SDK 提供）。
+> 要求支持同进程插件（`abiVersion: 1`）的 Atelyx（插件界面经整面帧绘制，控件层随插件 SDK 提供）。
 
 ## 界面
 
@@ -50,8 +50,8 @@ LoadImage 类节点的 `image` 输入横排成参考图卡，带**上传**、**�
 ## 构建
 
 ```sh
-cargo build --release   # 产物 target/release/comfyui-panel(.exe)
+cargo build --release   # 产物 target/release/comfyui_panel.dll（Linux 为 libcomfyui_panel.so）
 cargo test              # 纯逻辑单元测试
 ```
 
-依赖同级 `../../Atelyx` 的 `atelyx-plugin-sdk` / `atelyx-plugin-protocol`。把产物与 `plugin.json` 一并放进插件目录即可装载。
+依赖同级 `../../Atelyx` 的 `atelyx-plugin-sdk` / `atelyx-plugin-protocol`。把动态库产物与 `plugin.json` 一并放进插件目录即可装载。

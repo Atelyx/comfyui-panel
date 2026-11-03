@@ -1,11 +1,12 @@
 {
   "id": "com.atelyx.comfyui-panel",
   "name": "ComfyUI",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "apiVersion": 1,
+  "abiVersion": 1,
   "entry": {
-    "windows": "comfyui-panel.exe",
-    "linux": "comfyui-panel"
+    "windows": "comfyui_panel.dll",
+    "linux": "libcomfyui_panel.so"
   },
   "permissions": ["process", "state", "notification", "dialog", "fs", "vault", "clipboard", "ai"],
   "singleton": true,

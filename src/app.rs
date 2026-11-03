@@ -1,12 +1,15 @@
-//! 应用装配与编排：持状态、驱动轮询/WS/渲染三条常驻任务，把界面事件翻成状态迁移与 IO。
+//! 应用装配与编排：持状态、驱动轮询/WS 监督/渲染等常驻任务，把界面事件翻成状态迁移与 IO。
 //!
 //! Elm 单向数据流：`Core` 是唯一真源，任何变更经 `invalidate` 递增版本号，界面驱动据此重提新帧。
 //! 约束——绝不持 `MutexGuard` 跨 `await`：需要 IO 时先在锁内取出输入（克隆）、释放锁、`await`
 //! 网络/磁盘、再重新加锁写回，慢 IO 因此不卡住整棵重绘。
+//!
+//! 常驻任务只在插件自建的后台运行时上调度；阻塞的文件/序列化工作交 `spawn_blocking`，
+//! 不占住调度线程。停止信号统一走 [`App::stop_signal`]，任务退出后运行时才销毁。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use atelyx_plugin_sdk::frame_ui::FrameUi;
@@ -49,6 +52,8 @@ const RECAPTURE_BATCH: usize = 4;
 const FLOW_BATCH_INIT: usize = 8;
 /// 「显示更早」每次追加的批次数。
 const FLOW_BATCH_STEP: usize = 8;
+/// 启用时首轮刷新的等待上限：正常本地服务毫秒级完成，慢服务则交给常驻轮询补齐。
+const FIRST_REFRESH_BUDGET: Duration = Duration::from_secs(5);
 
 /// 选择浮层的一个候选：标签、是否当前值、选中后执行的动作。
 #[derive(Clone, Debug, PartialEq)]
@@ -138,14 +143,28 @@ pub struct App {
     ws_control: Mutex<Option<WsHandle>>,
     /// 落盘防抖代数：每次调度自增，仅最新一次真正写。
     save_gen: AtomicU64,
+    /// 后台运行时的句柄：常驻任务与回调里的派生任务都落在它上面。
+    runtime: OnceLock<tokio::runtime::Handle>,
+    /// 常驻任务停机的广播信号。
+    stop: watch::Sender<bool>,
+    /// WS 断连日志节流：一次断连只记一条，连上后复位。
+    ws_down_logged: AtomicBool,
+    /// 落盘失败日志节流：连续失败只记一条，写成功后复位。
+    save_failed_logged: AtomicBool,
 }
 
 impl App {
     // ---------- 生命周期 ----------
 
-    /// 读持久化状态 → 建 Core → 起三条常驻任务。返回尚未注册贡献点，留给 [`App::after_ready`]。
+    /// 读持久化状态 → 建 Core。常驻任务由入口在后台线程上启动，贡献点留给 [`App::after_ready`]。
     pub async fn bootstrap(ctx: Arc<Context>) -> Arc<App> {
-        let raw = ctx.state_read().await.unwrap_or(Value::Null);
+        let raw = match ctx.state_read().await {
+            Ok(raw) => raw,
+            Err(err) => {
+                ctx.log_error(&format!("读取插件状态失败，按默认配置启动：{err}"));
+                Value::Null
+            }
+        };
         let settings = crate::settings::from_value(raw.get("settings"));
         let origin_id = raw.get("originId").and_then(Value::as_str).unwrap_or("").to_string();
         let history: Vec<ResultImage> = raw
@@ -154,11 +173,14 @@ impl App {
             .map(|items| items.iter().filter_map(|item| serde_json::from_value(item.clone()).ok()).collect())
             .unwrap_or_default();
 
-        let private = ctx.private_dir().await.unwrap_or_else(|_| "data".into());
+        let private = match ctx.private_dir().await {
+            Ok(dir) => dir,
+            Err(err) => {
+                ctx.log_error(&format!("获取插件私有目录失败，退回 data：{err}"));
+                "data".to_string()
+            }
+        };
         let store = CopyStore::new(private);
-        store.ensure_dir();
-        // 缩略缓存不跨进程：上一代留下的参考图副本已无人认领，装载时清掉，避免私有目录只增不减。
-        store.clear_refs();
 
         let mut runtime = Runtime::new();
         runtime.load_persisted(origin_id, history);
@@ -177,7 +199,8 @@ impl App {
         };
 
         let (version_tx, _) = watch::channel(0u64);
-        let app = Arc::new(App {
+        let (stop_tx, _) = watch::channel(false);
+        Arc::new(App {
             ctx,
             core: Mutex::new(core),
             version: version_tx,
@@ -187,26 +210,106 @@ impl App {
             settings_ui: tokio::sync::Mutex::new(FrameUi::new()),
             ws_control: Mutex::new(None),
             save_gen: AtomicU64::new(0),
-        });
-
-        tokio::spawn(crate::ui::render_loop(app.clone()));
-        tokio::spawn(App::poll_loop(app.clone()));
-        tokio::spawn(App::workflow_poll_loop(app.clone()));
-        tokio::spawn(App::ws_loop(app.clone()));
-        app
+            runtime: OnceLock::new(),
+            stop: stop_tx,
+            ws_down_logged: AtomicBool::new(false),
+            save_failed_logged: AtomicBool::new(false),
+        })
     }
 
-    /// 注册贡献点、跑首轮刷新。
+    /// 后台线程启动序列：先在阻塞线程上清理私有目录，再启动常驻任务；这段耗时不计入 `on_ready` 的等待。
+    pub async fn start_tasks(self: &Arc<App>) {
+        // 缩略缓存不跨实例：上一代留下的参考图副本已无人认领，启动时清掉，避免私有目录只增不减。
+        let preparation = self.store.clone();
+        match tokio::task::spawn_blocking(move || preparation.prepare()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => self.ctx.log_error(&format!("初始化副本目录失败：{err}")),
+            Err(err) => self.ctx.log_error(&format!("初始化副本目录任务失败：{err}")),
+        }
+        tokio::spawn(crate::ui::render_loop(self.clone()));
+        tokio::spawn(App::poll_loop(self.clone()));
+        tokio::spawn(App::workflow_poll_loop(self.clone()));
+        tokio::spawn(App::ws_loop(self.clone()));
+    }
+
+    /// 注册贡献点，并在后台跑首轮刷新；启用最多等首轮 5 秒，慢服务不让启用失败，超时后刷新继续在后台完成。
     pub async fn after_ready(self: &Arc<App>) {
         // 面外壳内边距归插件自己控制（零外壳 + 根列 12），避免与宿主默认内边距叠加。
         let pad = Some(PaddingSpec::All(0.0));
-        let _ = self.ctx.register(ContributionSlot::Panel, SURFACE_PANEL, "ComfyUI 生成", Some("sparkles"), pad).await;
-        let _ = self.ctx.register(ContributionSlot::Settings, SURFACE_SETTINGS, "ComfyUI", Some("server"), pad).await;
+        if let Err(err) = self
+            .ctx
+            .register(ContributionSlot::Panel, SURFACE_PANEL, "ComfyUI 生成", Some("sparkles"), pad)
+            .await
+        {
+            self.ctx.log_error(&format!("注册生成面板失败：{err}"));
+        }
+        if let Err(err) = self
+            .ctx
+            .register(ContributionSlot::Settings, SURFACE_SETTINGS, "ComfyUI", Some("server"), pad)
+            .await
+        {
+            self.ctx.log_error(&format!("注册设置页失败：{err}"));
+        }
         // Agent 工具：旧宿主没有这个方法时静默降级（工具不出现，面板功能不受影响）
         crate::agent::register(&self.ctx).await;
 
-        self.run_poll_cycle().await;
-        self.refresh_workflows_cycle().await;
+        // 首轮刷新放到后台执行：超时只停止等待，不取消刷新本身，避免取到一半的新结果被丢弃。
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let app = self.clone();
+        self.spawn_task(async move {
+            app.run_poll_cycle().await;
+            app.refresh_workflows_cycle().await;
+            let _ = done_tx.send(());
+        });
+        let _ = tokio::time::timeout(FIRST_REFRESH_BUDGET, done_rx).await;
+    }
+
+    /// 记录后台运行时句柄；必须在任何回调到达前完成。
+    pub fn attach_runtime(&self, handle: tokio::runtime::Handle) {
+        let _ = self.runtime.set(handle);
+    }
+
+    /// 派生任务的唯一入口：一律落到后台运行时，避免占用 SDK 回调线程。
+    pub(crate) fn spawn_task<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if let Some(handle) = self.runtime.get() {
+            handle.spawn(future);
+        }
+    }
+
+    /// 常驻任务的停止信号。
+    pub(crate) fn stop_signal(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+
+    pub(crate) fn is_stopping(&self) -> bool {
+        *self.stop.borrow()
+    }
+
+    /// 广播停机；后台线程据此退出。
+    pub fn signal_stop(&self) {
+        let _ = self.stop.send(true);
+    }
+
+    /// 等待指定时长；期间收到停机信号则返回 false。
+    pub(crate) async fn sleep_or_stop(&self, delay: Duration) -> bool {
+        let mut stop = self.stop.subscribe();
+        if *stop.borrow() {
+            return false;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => true,
+            _ = stop.changed() => false,
+        }
+    }
+
+    /// 同一类失败只记一条日志，避免长期离线刷屏。
+    fn log_failure_once(ctx: &Context, flag: &AtomicBool, message: &str) {
+        if !flag.swap(true, Ordering::Relaxed) {
+            ctx.log_error(message);
+        }
     }
 
     // ---------- 状态访问 ----------
@@ -230,7 +333,7 @@ impl App {
         let ctx = self.ctx.clone();
         let title = title.to_string();
         let body = body.map(str::to_string);
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let _ = ctx.notify(&title, body.as_deref(), level).await;
         });
     }
@@ -244,9 +347,15 @@ impl App {
     // ---------- 轮询 ----------
 
     async fn poll_loop(app: Arc<App>) {
+        let mut stop = app.stop_signal();
         loop {
-            app.run_poll_cycle().await;
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::select! {
+                _ = app.run_poll_cycle() => {}
+                _ = stop.changed() => return,
+            }
+            if !app.sleep_or_stop(POLL_INTERVAL).await {
+                return;
+            }
         }
     }
 
@@ -310,7 +419,10 @@ impl App {
         let mut fresh = { self.core().runtime.take_fresh_results(&history) };
         if !fresh.is_empty() {
             runtime::capture_copies(&mut fresh, &settings, &http, &self.store).await;
-            let merged = self.core().runtime.merge_results(fresh, &self.store);
+            let (merged, evicted) = { self.core().runtime.merge_results(fresh) };
+            for local in evicted {
+                self.store.remove_async(&local).await;
+            }
             if merged {
                 self.invalidate();
                 self.schedule_save();
@@ -329,9 +441,15 @@ impl App {
     }
 
     async fn workflow_poll_loop(app: Arc<App>) {
+        let mut stop = app.stop_signal();
         loop {
-            app.refresh_workflows_cycle().await;
-            tokio::time::sleep(WORKFLOW_INTERVAL).await;
+            tokio::select! {
+                _ = app.refresh_workflows_cycle() => {}
+                _ = stop.changed() => return,
+            }
+            if !app.sleep_or_stop(WORKFLOW_INTERVAL).await {
+                return;
+            }
         }
     }
 
@@ -363,7 +481,11 @@ impl App {
 
     /// 连接监督循环：每次连接建独立事件通道，断开后按原因决定重连节奏。
     async fn ws_loop(app: Arc<App>) {
+        let mut stop = app.stop_signal();
         loop {
+            if app.is_stopping() {
+                return;
+            }
             let url = {
                 let core = app.core();
                 runtime::socket_url(&core.settings, &core.runtime.book.client_id, &app.http)
@@ -371,23 +493,49 @@ impl App {
             let shutdown = Arc::new(AtomicBool::new(false));
             let (tx, mut rx) = mpsc::unbounded_channel();
             let task = tokio::spawn(ws_run(url, tx, shutdown.clone()));
-            *app.ws_control.lock().unwrap() = Some(WsHandle { shutdown: shutdown.clone(), task });
+            *app.ws_control.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(WsHandle { shutdown: shutdown.clone(), task });
 
             // 发送端只此一份，随读任务收场而 drop：rx 返回 None 即本次连接结束。
-            while let Some(event) = rx.recv().await {
-                if matches!(event, WsEvent::Disconnected) {
-                    break;
+            loop {
+                tokio::select! {
+                    event = rx.recv() => match event {
+                        Some(WsEvent::Disconnected) => {
+                            Self::log_failure_once(
+                                &app.ctx,
+                                &app.ws_down_logged,
+                                "ComfyUI WebSocket 已停止重连",
+                            );
+                            break;
+                        }
+                        Some(event) => {
+                            app.ws_down_logged.store(false, Ordering::Relaxed);
+                            app.handle_ws_event(event).await;
+                        }
+                        None => break,
+                    },
+                    _ = stop.changed() => {
+                        let handle = app
+                            .ws_control
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take();
+                        if let Some(handle) = handle {
+                            handle.shutdown.store(true, Ordering::Relaxed);
+                            handle.task.abort();
+                        }
+                        return;
+                    }
                 }
-                app.handle_ws_event(event).await;
             }
-            let handle = app.ws_control.lock().unwrap().take();
+            let handle = app.ws_control.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
             if let Some(handle) = handle {
                 let _ = handle.task.await;
             }
 
             // 被改地址/服务下线置换（shutdown=true）：立即用新设置重连，无需退避。
-            if !shutdown.load(Ordering::Relaxed) {
-                tokio::time::sleep(WS_RECONNECT).await;
+            if !shutdown.load(Ordering::Relaxed) && !app.sleep_or_stop(WS_RECONNECT).await {
+                return;
             }
         }
     }
@@ -445,13 +593,42 @@ impl App {
     fn schedule_save(self: &Arc<App>) {
         let gen = self.save_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let app = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(SAVE_DEBOUNCE).await;
+        self.spawn_task(async move {
+            if !app.sleep_or_stop(SAVE_DEBOUNCE).await {
+                return;
+            }
             if app.save_gen.load(Ordering::SeqCst) != gen {
                 return; // 期间又有变更，交给最新那次落盘
             }
-            let envelope = build_envelope(&app.core());
-            let _ = app.ctx.state_write(envelope).await;
+            // 先在锁内取走待落的快照，序列化只持有数据、不再持有 App/Context。
+            let snapshot = {
+                let core = app.core();
+                PersistSnapshot {
+                    settings: serde_json::to_value(&core.settings).unwrap_or(Value::Null),
+                    origin_id: core.runtime.book.origin_id.clone(),
+                    history: core.runtime.snap.results.iter().take(HISTORY_LIMIT).cloned().collect(),
+                }
+            };
+            let serialization = tokio::task::spawn_blocking(move || snapshot.into_value());
+            let envelope = match serialization.await {
+                Ok(envelope) => envelope,
+                Err(err) => {
+                    Self::log_failure_once(
+                        &app.ctx,
+                        &app.save_failed_logged,
+                        &format!("序列化插件状态失败：{err}"),
+                    );
+                    return;
+                }
+            };
+            match app.ctx.state_write(envelope).await {
+                Ok(()) => app.save_failed_logged.store(false, Ordering::Relaxed),
+                Err(err) => Self::log_failure_once(
+                    &app.ctx,
+                    &app.save_failed_logged,
+                    &format!("写入插件状态失败：{err}"),
+                ),
+            }
         });
     }
 
@@ -596,12 +773,14 @@ impl App {
     /// 托管进程启动：进程生命周期由 controller 自持，界面不等它跑完。
     pub(crate) fn start_service(self: &Arc<App>) {
         let app = self.clone();
-        tokio::spawn(async move { controller::start(&app).await });
+        self.spawn_task(async move {
+            controller::start(&app).await;
+        });
     }
 
     pub(crate) fn stop_service(self: &Arc<App>) {
         let app = self.clone();
-        tokio::spawn(async move { controller::stop(&app).await });
+        self.spawn_task(async move { controller::stop(&app).await });
     }
 
     // ---------- 选择浮层 ----------
@@ -874,13 +1053,13 @@ impl App {
                 }
             };
             let relative = ref_path(&ref_copy_name(&name));
-            if self.store.save(&relative, &fetched).is_err() {
+            if self.store.save_async(&relative, fetched).await.is_err() {
                 failed.push(name);
                 continue;
             }
             let stale = self.core().session.refs.put(&name, relative);
             for old in stale {
-                self.store.remove(&old);
+                self.store.remove_async(&old).await;
             }
             changed = true;
         }
@@ -1133,6 +1312,7 @@ impl App {
         let params = PickFileParams {
             title: Some("另存结果图".to_string()),
             save: Some(true),
+            multiple: false,
             default_path: Some(crate::archive::save_as_name(&item.image_ref.filename)),
             filters: Vec::new(),
         };
@@ -1144,9 +1324,11 @@ impl App {
                 return;
             }
         };
-        match std::fs::write(&path, &bytes) {
-            Ok(()) => self.set_notice(format!("已另存到 {path}")),
-            Err(err) => self.set_error(format!("写入文件失败：{err}")),
+        let target = path.clone();
+        match tokio::task::spawn_blocking(move || std::fs::write(&target, &bytes)).await {
+            Ok(Ok(())) => self.set_notice(format!("已另存到 {path}")),
+            Ok(Err(err)) => self.set_error(format!("写入文件失败：{err}")),
+            Err(err) => self.set_error(format!("写入文件任务失败：{err}")),
         }
     }
 
@@ -1172,6 +1354,7 @@ impl App {
         let params = PickFileParams {
             title: Some("选择参考图".to_string()),
             save: Some(false),
+            multiple: false,
             default_path: None,
             filters: vec![FileFilter { name: "图片".to_string(), extensions: vec!["png".into(), "jpg".into(), "jpeg".into(), "webp".into(), "bmp".into()] }],
         };
@@ -1183,10 +1366,15 @@ impl App {
                 return;
             }
         };
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
+        let source = path.clone();
+        let bytes = match tokio::task::spawn_blocking(move || std::fs::read(&source)).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(err)) => {
                 self.set_error(format!("读取图片失败：{err}"));
+                return;
+            }
+            Err(err) => {
+                self.set_error(format!("读取图片任务失败：{err}"));
                 return;
             }
         };
@@ -1213,8 +1401,9 @@ impl App {
                 self.set_notice(format!("已上传：{}", image_ref.filename));
                 self.write_field_value(key, Value::String(image_ref.filename.clone()));
                 // 服务端同名覆盖后旧缩略已失真：先作废这一条，再按新字节重抓
-                if let Some(old) = self.core().session.refs.remove(&image_ref.filename) {
-                    self.store.remove(&old);
+                let old = self.core().session.refs.remove(&image_ref.filename);
+                if let Some(old) = old {
+                    self.store.remove_async(&old).await;
                 }
                 self.capture_ref_thumbs().await;
             }
@@ -1280,7 +1469,7 @@ impl App {
 /// 读结果字节：本地副本命中优先（存活于服务重启后），否则回源取图。
 async fn read_result_bytes(store: &CopyStore, settings: &ComfySettings, http: &reqwest::Client, item: &ResultImage) -> Result<Vec<u8>, String> {
     if let Some(local) = item.local.as_deref() {
-        if let Some(bytes) = store.read(local) {
+        if let Some(bytes) = store.read_async(local).await {
             return Ok(bytes);
         }
     }
@@ -1391,16 +1580,21 @@ pub(crate) fn split_prefixed(id: &str) -> (Option<&str>, &str) {
     (None, id)
 }
 
-/// 拼落盘信封：设置 + 来源标记 + 历史（截断到上限）。
-fn build_envelope(core: &Core) -> Value {
-    let settings = serde_json::to_value(&core.settings).unwrap_or(Value::Null);
-    let origin_id = core.runtime.book.origin_id.clone();
-    let history: Vec<&ResultImage> = core.runtime.snap.results.iter().take(HISTORY_LIMIT).collect();
-    json!({
-        "settings": settings,
-        "originId": origin_id,
-        "history": history,
-    })
+/// 落盘快照：设置 + 来源标记 + 历史（截断到上限），序列化在阻塞线程上进行。
+struct PersistSnapshot {
+    settings: Value,
+    origin_id: String,
+    history: Vec<ResultImage>,
+}
+
+impl PersistSnapshot {
+    fn into_value(self) -> Value {
+        json!({
+            "settings": self.settings,
+            "originId": self.origin_id,
+            "history": self.history,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ pub async fn render_panel(app: &Arc<App>) {
     let snapshot = PanelSnapshot::read(&mut app.core(), surface);
     let mut ui = app.panel_ui.lock().await;
     if let Err(err) = ui.render(&app.ctx, SURFACE_PANEL, move |ui| views::panel_frame(ui, &snapshot)).await {
-        eprintln!("生成面板提交失败：{err}");
+        app.ctx.log_error(&format!("生成面板提交失败：{err}"));
     }
 }
 
@@ -40,7 +40,7 @@ pub async fn render_settings(app: &Arc<App>) {
     };
     let mut ui = app.settings_ui.lock().await;
     if let Err(err) = ui.render(&app.ctx, SURFACE_SETTINGS, move |ui| views::settings_frame(ui, &snapshot)).await {
-        eprintln!("设置页提交失败：{err}");
+        app.ctx.log_error(&format!("设置页提交失败：{err}"));
     }
 }
 
@@ -68,19 +68,27 @@ pub async fn handle_frame_input(app: &Arc<App>, params: FrameInputParams) {
             }
             render_settings(app).await;
         }
-        other => eprintln!("收到未知面的输入：{other}"),
+        other => app.ctx.log_error(&format!("收到未知面的输入：{other}")),
     }
 }
 
 pub async fn render_loop(app: Arc<App>) {
     let mut rx = app.changes();
+    let mut stop = app.stop_signal();
     // 订阅前的唤醒不可感知（watch 不补发）：先按当前状态渲染一遍已挂载的面
     render_attached(&app).await;
     loop {
-        if rx.changed().await.is_err() {
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            _ = stop.changed() => return,
+        }
+        if !app.sleep_or_stop(RENDER_GAP).await {
             return;
         }
-        tokio::time::sleep(RENDER_GAP).await;
         render_attached(&app).await;
     }
 }

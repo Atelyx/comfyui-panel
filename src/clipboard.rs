@@ -13,9 +13,15 @@ pub async fn read_png_bytes(ctx: &Context) -> Result<Vec<u8>, String> {
     if image.width == 0 || image.height == 0 {
         return Err("图片内容为空".to_string());
     }
-    base64::engine::general_purpose::STANDARD
-        .decode(image.base64.as_bytes())
-        .map_err(|e| format!("图片数据解码失败：{e}"))
+    let encoded = image.base64;
+    match tokio::task::spawn_blocking(move || {
+        base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes())
+    })
+    .await
+    {
+        Ok(result) => result.map_err(|e| format!("图片数据解码失败：{e}")),
+        Err(err) => Err(format!("图片解码任务失败：{err}")),
+    }
 }
 
 /// 粘贴件的上传文件名：`clipboard-{毫秒}.png`，与用户自选文件区分。

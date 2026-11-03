@@ -39,17 +39,17 @@ pub async fn register(ctx: &Context) {
         },
     });
     if let Err(err) = ctx.register_tool(TOOL_NAME, TOOL_DESCRIPTION, parameters).await {
-        eprintln!("注册 Agent 工具 {TOOL_NAME} 失败：{err}");
+        ctx.log_error(&format!("注册 Agent 工具 {TOOL_NAME} 失败：{err}"));
     }
 }
 
 /// 处理一次工具调用：另起任务执行，调用结果经同一 `callId` 回报。
 pub async fn on_tool_call(app: &std::sync::Arc<App>, params: ToolCallParams) {
-    let app = std::sync::Arc::clone(app);
     let call_id = params.call_id.clone();
-    tokio::spawn(async move {
-        let outcome = run_tool(&app, &params).await;
-        let _ = app.ctx.tool_result(&call_id, &outcome.content, outcome.is_error).await;
+    let worker = std::sync::Arc::clone(app);
+    app.spawn_task(async move {
+        let outcome = run_tool(&worker, &params).await;
+        let _ = worker.ctx.tool_result(&call_id, &outcome.content, outcome.is_error).await;
     });
 }
 

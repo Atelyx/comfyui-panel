@@ -214,10 +214,11 @@ impl Runtime {
         fresh
     }
 
-    /// 新结果并入画廊：同 key 只保留画廊里已有的那条、按时间倒序、超上限淘汰并删其副本；返回是否真的并入了内容。
-    pub fn merge_results(&mut self, fresh: Vec<ResultImage>, store: &CopyStore) -> bool {
+    /// 新结果并入画廊：同 key 只保留画廊里已有的那条、按时间倒序、超上限淘汰。
+    /// 返回是否真的并入了内容，以及被淘汰条目待删的副本路径（由调用方在锁外删除）。
+    pub fn merge_results(&mut self, fresh: Vec<ResultImage>) -> (bool, Vec<String>) {
         if fresh.is_empty() {
-            return false;
+            return (false, Vec::new());
         }
         let mut all = mem::take(&mut self.snap.results);
         all.extend(fresh);
@@ -226,16 +227,17 @@ impl Runtime {
         let mut seen = BTreeSet::new();
         all.retain(|item| seen.insert(item.key.clone()));
         all.sort_by(|a, b| b.created_at.partial_cmp(&a.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        let mut evicted_paths = Vec::new();
         if all.len() > HISTORY_LIMIT {
             let evicted = all.split_off(HISTORY_LIMIT);
             for item in evicted {
                 if let Some(local) = item.local {
-                    store.remove(&local);
+                    evicted_paths.push(local);
                 }
             }
         }
         self.snap.results = all;
-        true
+        (true, evicted_paths)
     }
 
     /// 取仍缺本地副本、且没耗尽补抓轮次的结果（首抓遇网络/写盘失败留下的缺口），供补抓重试。
@@ -432,7 +434,7 @@ pub async fn capture_copies(fresh: &mut [ResultImage], settings: &ComfySettings,
         let path = copy_path(&copy_name(&item.prompt_id, index, &item.image_ref.filename));
         if let Ok(bytes) = client.image_bytes(&item.image_ref).await {
             item.pixel = crate::history::image_size(&bytes);
-            if store.save(&path, &bytes).is_ok() {
+            if store.save_async(&path, bytes).await.is_ok() {
                 item.local = Some(path);
             }
         }
@@ -447,7 +449,7 @@ pub async fn recapture_copies(pending: &mut [ResultImage], settings: &ComfySetti
         let path = copy_path(&retry_copy_name(&item.prompt_id, &item.image_ref.filename));
         if let Ok(bytes) = client.image_bytes(&item.image_ref).await {
             item.pixel = crate::history::image_size(&bytes);
-            if store.save(&path, &bytes).is_ok() {
+            if store.save_async(&path, bytes).await.is_ok() {
                 item.local = Some(path);
             }
         }
@@ -676,14 +678,13 @@ mod tests {
 
     #[test]
     fn merge_results_keeps_one_entry_per_key() {
-        let store = CopyStore::new("unused".into());
         let mut runtime = Runtime::new();
         runtime.snap.results = vec![result("k1", Some("history/a.png"))];
         let fresh = vec![
             ResultImage { key: "k1".into(), created_at: 9.0, ..Default::default() },
             ResultImage { key: "k2".into(), created_at: 3.0, ..Default::default() },
         ];
-        assert!(runtime.merge_results(fresh, &store));
+        assert!(runtime.merge_results(fresh).0);
         assert_eq!(runtime.snap.results.len(), 2, "同 key 只留一条");
         let kept = runtime.snap.results.iter().find(|i| i.key == "k1").unwrap();
         assert_eq!(kept.local.as_deref(), Some("history/a.png"), "保留已带副本路径的那条");

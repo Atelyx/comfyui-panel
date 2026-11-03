@@ -37,13 +37,18 @@ pub async fn load_workflow(client: &ComfyClient, file: &WorkflowFileInfo) -> Res
 pub async fn save_workflow_params(client: &ComfyClient, file: &WorkflowFileInfo, prompt: &Value) -> Result<(), String> {
     let text = client.read_user_file(&file.path).await?;
     let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("文件不是合法 JSON：{e}"))?;
-    let content = if is_api_format(&parsed) {
-        serde_json::to_string_pretty(prompt).map_err(|e| e.to_string())?
-    } else {
-        let mut draft = parsed;
-        apply_draft_to_ui(&mut draft, prompt)?;
-        serde_json::to_string_pretty(&draft).map_err(|e| e.to_string())?
-    };
+    let draft = prompt.clone();
+    let content = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        if is_api_format(&parsed) {
+            serde_json::to_string_pretty(&draft).map_err(|e| e.to_string())
+        } else {
+            let mut tree = parsed;
+            apply_draft_to_ui(&mut tree, &draft)?;
+            serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())
+        }
+    })
+    .await
+    .map_err(|err| format!("序列化工作流任务失败：{err}"))??;
     client.write_user_file(&file.path, &content).await
 }
 

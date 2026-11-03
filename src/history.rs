@@ -272,8 +272,15 @@ impl CopyStore {
     }
 
     /// 确保副本目录存在（私有目录根由宿主建，子目录归本模块）。
-    pub fn ensure_dir(&self) {
-        let _ = std::fs::create_dir_all(self.root.join(COPY_DIR));
+    pub fn ensure_dir(&self) -> Result<(), String> {
+        std::fs::create_dir_all(self.root.join(COPY_DIR)).map_err(|e| format!("创建副本目录失败：{e}"))
+    }
+
+    /// 启动准备：建目录并清掉上一代留下的参考图缩略；在阻塞线程上调用。
+    pub fn prepare(&self) -> Result<(), String> {
+        self.ensure_dir()?;
+        self.clear_refs();
+        Ok(())
     }
 
     fn abs(&self, relative: &str) -> PathBuf {
@@ -301,6 +308,33 @@ impl CopyStore {
     /// 删副本：尽力而为，失败（已不存在/被占用）不影响状态。
     pub fn remove(&self, relative: &str) {
         let _ = std::fs::remove_file(self.abs(relative));
+    }
+
+    /// 写副本的异步包装：文件读写不占调度线程。
+    pub async fn save_async(&self, relative: &str, bytes: Vec<u8>) -> Result<(), String> {
+        let store = self.clone();
+        let relative = relative.to_string();
+        match tokio::task::spawn_blocking(move || store.save(&relative, &bytes)).await {
+            Ok(result) => result,
+            Err(err) => Err(format!("副本写入任务失败：{err}")),
+        }
+    }
+
+    /// 读副本的异步包装。
+    pub async fn read_async(&self, relative: &str) -> Option<Vec<u8>> {
+        let store = self.clone();
+        let relative = relative.to_string();
+        tokio::task::spawn_blocking(move || store.read(&relative))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// 删副本的异步包装。
+    pub async fn remove_async(&self, relative: &str) {
+        let store = self.clone();
+        let relative = relative.to_string();
+        let _ = tokio::task::spawn_blocking(move || store.remove(&relative)).await;
     }
 
     /// 清空参考图缩略目录：缓存不落盘，装载时旧副本已无人认领，删掉以免跨进程无限堆积。
