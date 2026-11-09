@@ -1,0 +1,31 @@
+schema_version = "1.0.0"
+id = "com.atelyx.comfyui-panel"
+name = "ComfyUI"
+tagline = "选工作流、调参、排队生成，结果存进当前仓库"
+version = "0.1.4"
+type = "add-on"
+maintainer = "Xuhang944 <352643547@qq.com>"
+license = ["SPDX:MIT"]
+copyright = ["2026 Xuhang944"]
+platforms = ["windows-x64", "linux-x64"]
+host_version_min = "0.6.0"
+api_version = 1
+singleton = true
+keep_mounted_on_vault_switch = true
+
+[permissions]
+process = "托管启停 ComfyUI 进程"
+files = "把生成结果与参考图存进仓库"
+clipboard = "读取粘贴的参考图、复制结果图"
+dialog = "选择工作流与保存位置"
+notification = "生成完成与失败提醒"
+ai = "把当前生成登记为 AI 工具"
+state = "保存本插件的设置与工作流缓存"
+
+[entry]
+windows = "comfyui_panel.dll"
+linux = "libcomfyui_panel.so"
+
+[build]
+paths = ["comfyui_panel.dll", "libcomfyui_panel.so"]
+paths_exclude_pattern = ["target/", ".*"]

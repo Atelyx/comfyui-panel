@@ -1,13 +1,12 @@
-//! 两面整面帧的驱动：先取面尺寸 → 锁外建快照 → 加控件层锁提交一帧。
-//!
-//! 原始输入先经控件层翻成语义事件（焦点 / 光标 / 选区 / 滚动就地更新），分派成状态迁移后再重提一帧；
-//! 同一面的输入由 SDK 串行回调，逐条按到达顺序处理，不另起任务。
+//! 两面的绘制与输入：宿主重绘拍里按当前状态同步出画；
+//! 原始输入经控件层翻成语义事件（焦点 / 光标 / 选区 / 滚动就地更新），分派成状态迁移后再请求重绘。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, Key, KeyAction, NamedKey};
 use atelyx_plugin_sdk::frame_ui::UiEvent;
+use atelyx_plugin_sdk::{DrawFrame, FrameUi};
 use serde_json::Value;
 
 use crate::app::{self, App, SURFACE_PANEL, SURFACE_SETTINGS};
@@ -18,57 +17,59 @@ use crate::views::{
     P_TEXT, P_UPLOAD,
 };
 
-/// 整面重提的合帧间隔：轮询拍与逐键输入并成一次提交。
+/// 整面重绘的合帧间隔：轮询拍与逐键输入并成一次请求。
 const RENDER_GAP: Duration = Duration::from_millis(120);
 
-/// 生成面板提交一帧。面尺寸只在控件层里（构建闭包读不到），先取尺寸再算快照。
-/// 控件层锁分两次取：算快照要读业务锁，两把锁不能嵌套成环。
-pub async fn render_panel(app: &Arc<App>) {
-    let surface = app.panel_ui.lock().await.size();
-    let snapshot = PanelSnapshot::read(&mut app.core(), surface);
-    let mut ui = app.panel_ui.lock().await;
-    if let Err(err) = ui.render(&app.ctx, SURFACE_PANEL, move |ui| views::panel_frame(ui, &snapshot)).await {
-        app.ctx.log_error(&format!("生成面板提交失败：{err}"));
+/// 宿主重绘拍里按面同步绘制：只读当前状态，面尺寸由 `DrawFrame` 给出。
+pub fn draw_surface(app: &Arc<App>, frame: &mut DrawFrame<'_, '_>) {
+    match frame.surface_id() {
+        SURFACE_PANEL => {
+            let snapshot = PanelSnapshot::read(&mut app.core(), frame.size());
+            let _ = frame.build(|ui| views::panel_frame(ui, &snapshot));
+        }
+        SURFACE_SETTINGS => {
+            let snapshot = {
+                let core = app.core();
+                SettingsSnapshot::read(&core)
+            };
+            let _ = frame.build(|ui| views::settings_frame(ui, &snapshot));
+        }
+        _ => {}
     }
 }
 
-/// 设置页提交一帧：快照在锁外构建，渲染期间不持业务锁。
-pub async fn render_settings(app: &Arc<App>) {
-    let snapshot = {
-        let core = app.core();
-        SettingsSnapshot::read(&core)
-    };
-    let mut ui = app.settings_ui.lock().await;
-    if let Err(err) = ui.render(&app.ctx, SURFACE_SETTINGS, move |ui| views::settings_frame(ui, &snapshot)).await {
-        app.ctx.log_error(&format!("设置页提交失败：{err}"));
-    }
-}
-
-/// 面帧的原始输入：翻成语义事件 → 逐条应用 → 原始按键里的收起 → 重提一帧。
-pub async fn handle_frame_input(app: &Arc<App>, params: FrameInputParams) {
+/// 面帧的原始输入：翻成语义事件 → 逐条应用 → 原始按键里的收起 → 请求重绘。
+pub async fn handle_frame_input(app: &Arc<App>, params: FrameInputParams, ui: &mut FrameUi) {
     match params.surface_id.as_str() {
         SURFACE_PANEL => {
-            let events = {
-                let mut ui = app.panel_ui.lock().await;
-                ui.event(&app.ctx, &params.input, |id| panel_value(app, id)).await
-            };
+            let events = ui
+                .event(&app.ctx, &params.input, |id| panel_value(app, id))
+                .await;
             for event in events {
                 apply_panel(app, event).await;
             }
             dismiss_on_escape(app, &params.input);
-            render_panel(app).await;
         }
         SURFACE_SETTINGS => {
-            let events = {
-                let mut ui = app.settings_ui.lock().await;
-                ui.event(&app.ctx, &params.input, |id| settings_value(app, id)).await
-            };
+            let events = ui
+                .event(&app.ctx, &params.input, |id| settings_value(app, id))
+                .await;
             for event in events {
                 apply_settings(app, event).await;
             }
-            render_settings(app).await;
         }
-        other => app.ctx.log_error(&format!("收到未知面的输入：{other}")),
+        other => {
+            app.ctx.log_error(&format!("收到未知面的输入：{other}"));
+            return;
+        }
+    }
+    request_redraw(app).await;
+}
+
+/// 请求宿主重绘一次：绘制在下一拍由 [`draw_surface`] 完成。
+async fn request_redraw(app: &Arc<App>) {
+    if let Err(err) = app.ctx.request_redraw().await {
+        app.ctx.log_error(&format!("请求重绘失败：{err}"));
     }
 }
 
@@ -93,15 +94,9 @@ pub async fn render_loop(app: Arc<App>) {
     }
 }
 
+/// 状态变了就请求宿主重绘（整窗重绘，各面在重绘拍里按当前状态出画）。
 async fn render_attached(app: &Arc<App>) {
-    let attached: Vec<String> = app.core().attached.iter().cloned().collect();
-    for surface in attached {
-        match surface.as_str() {
-            SURFACE_PANEL => render_panel(app).await,
-            SURFACE_SETTINGS => render_settings(app).await,
-            _ => {}
-        }
-    }
+    request_redraw(app).await;
 }
 
 // ---------- 生成面板 ----------

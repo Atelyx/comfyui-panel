@@ -639,11 +639,8 @@ fn paint_command(canvas: &mut Canvas<'_, '_>, command: &DrawCommand, dx: f32, dy
             color,
             weight,
             family,
-            italic,
             max_width,
             align,
-            family_name,
-            layout,
         } => {
             let width = content.chars().map(|c| if is_wide(c) { *size } else { *size * 0.55 }).sum::<f32>();
             let rect = atelyx_plugin_sdk::frame_ui::Rect::new(x + dx, y + dy, width, size * 1.2);
@@ -658,11 +655,8 @@ fn paint_command(canvas: &mut Canvas<'_, '_>, command: &DrawCommand, dx: f32, dy
                 color: *color,
                 weight: *weight,
                 family: *family,
-                italic: *italic,
                 max_width: *max_width,
                 align: *align,
-                family_name: family_name.clone(),
-                layout: *layout,
             });
         }
         other => {
@@ -783,11 +777,8 @@ fn text(x: f32, y: f32, content: &str, size: f32, color: PaintColor, weight: Opt
         color,
         weight,
         family: None,
-        italic: false,
         max_width: None,
         align: None,
-        family_name: None,
-        layout: None,
     }
 }
 

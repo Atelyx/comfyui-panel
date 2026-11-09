@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use atelyx_plugin_sdk::frame_ui::FrameUi;
 use atelyx_plugin_sdk::protocol::method::{
     ContributionSlot, FileFilter, NotificationLevel, PaddingSpec, PickFileParams, SurfaceAttachedParams,
     SurfaceDetachedParams,
@@ -134,10 +133,6 @@ pub struct App {
     version: watch::Sender<u64>,
     pub(crate) http: reqwest::Client,
     store: CopyStore,
-    /// 生成面板的控件层（交互态 / 量算缓存跨帧保留），面重新挂载时重建。
-    pub(crate) panel_ui: tokio::sync::Mutex<FrameUi>,
-    /// 设置面的控件层。
-    pub(crate) settings_ui: tokio::sync::Mutex<FrameUi>,
     /// 当前连接的关停把手：改地址/服务下线时置关停标志并中止读任务——空闲无帧时读循环
     /// 正 await 下一帧，只有中止能让它立刻收场。
     ws_control: Mutex<Option<WsHandle>>,
@@ -206,8 +201,6 @@ impl App {
             version: version_tx,
             http: reqwest::Client::new(),
             store,
-            panel_ui: tokio::sync::Mutex::new(FrameUi::new()),
-            settings_ui: tokio::sync::Mutex::new(FrameUi::new()),
             ws_control: Mutex::new(None),
             save_gen: AtomicU64::new(0),
             runtime: OnceLock::new(),
@@ -1312,7 +1305,6 @@ impl App {
         let params = PickFileParams {
             title: Some("另存结果图".to_string()),
             save: Some(true),
-            multiple: false,
             default_path: Some(crate::archive::save_as_name(&item.image_ref.filename)),
             filters: Vec::new(),
         };
@@ -1354,7 +1346,6 @@ impl App {
         let params = PickFileParams {
             title: Some("选择参考图".to_string()),
             save: Some(false),
-            multiple: false,
             default_path: None,
             filters: vec![FileFilter { name: "图片".to_string(), extensions: vec!["png".into(), "jpg".into(), "jpeg".into(), "webp".into(), "bmp".into()] }],
         };
@@ -1439,12 +1430,6 @@ impl App {
                 // 挂上来就当用户在看最新一屏：首帧贴底，之后新结果才继续拉底。
                 core.session.flow_at_bottom = true;
             }
-        }
-        // 控件层随面重建：旧面的焦点与滚动位置不跨挂载沿用。
-        if params.surface_id == SURFACE_PANEL {
-            *self.panel_ui.lock().await = FrameUi::new();
-        } else {
-            *self.settings_ui.lock().await = FrameUi::new();
         }
         self.invalidate();
     }

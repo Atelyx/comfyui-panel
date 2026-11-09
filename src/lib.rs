@@ -10,7 +10,7 @@ use atelyx_plugin_protocol::frame::FrameInputParams;
 use atelyx_plugin_sdk::protocol::method::{
     ProcessEventParams, SurfaceAttachedParams, SurfaceDetachedParams, ToolCallParams,
 };
-use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, DrawFrame, FrameUi, PluginHandler};
 
 use crate::app::App;
 
@@ -123,10 +123,16 @@ impl PluginHandler for Handler {
         drop(service.app);
     }
 
-    /// 面帧输入：SDK 逐条串行回调，同一面的输入按到达顺序就地处理并重提一帧。
-    async fn on_frame_input(&self, _ctx: &Context, params: FrameInputParams) {
+    fn on_draw(&self, frame: &mut DrawFrame<'_, '_>) {
         if let Some(app) = self.app() {
-            ui::handle_frame_input(&app, params).await;
+            ui::draw_surface(&app, frame);
+        }
+    }
+
+    /// 面帧输入：SDK 逐条串行回调，同一面的输入按到达顺序就地处理并请求重绘。
+    async fn on_frame_input(&self, _ctx: &Context, params: FrameInputParams, ui: &mut FrameUi) {
+        if let Some(app) = self.app() {
+            ui::handle_frame_input(&app, params, ui).await;
         }
     }
 
@@ -158,23 +164,8 @@ impl PluginHandler for Handler {
     }
 }
 
-fn plugin_info() -> PluginInfo {
-    PluginInfo {
-        id: "com.atelyx.comfyui-panel".to_string(),
-        name: "ComfyUI".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    }
-}
-
-fn handler_factory() -> Box<dyn PluginHandler> {
-    Box::new(Handler::new())
-}
-
-/// 插件导出的唯一 C 入口。
-#[no_mangle]
-pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginApi {
-    atelyx_plugin_sdk::in_process::plugin_api(plugin_info, handler_factory)
-}
+// 插件以 cdylib 交付：宿主按 C ABI 符号建会话，与真实插件同一条通路
+atelyx_plugin_sdk::export_in_process_plugin!(Handler::new());
 
 mod app;
 mod agent;

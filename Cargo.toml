@@ -10,8 +10,8 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
-atelyx-plugin-sdk = { path = "../../Atelyx/atelyx-plugin-sdk" }
-atelyx-plugin-protocol = { path = "../../Atelyx/atelyx-plugin-protocol" }
+atelyx-plugin-sdk = { path = "../../Atelyx/crates/plugin-sdk" }
+atelyx-plugin-protocol = { path = "../../Atelyx/crates/plugin-protocol" }
 serde = { version = "1", features = ["derive"] }
 # 工作流的节点顺序即提交顺序（提示词取首个、尺寸取值、节点分组都依赖它），必须保序
 serde_json = { version = "1", features = ["preserve_order"] }
