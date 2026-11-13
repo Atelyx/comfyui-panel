@@ -58,6 +58,9 @@ pub const ID_LB_COPY_IMAGE: &str = "lb_copy_image";
 pub const ID_LB_ARCHIVE: &str = "lb_archive";
 pub const ID_LB_SAVE_AS: &str = "lb_save_as";
 
+// ---------- 维护 ----------
+pub const ID_UPDATE: &str = "update";
+
 // ---------- 设置页静态节点 id ----------
 pub const SET_HOST: &str = "set_host";
 pub const SET_PORT: &str = "set_port";
@@ -109,6 +112,7 @@ pub struct StatusView {
     pub managed: bool,
     pub starting: bool,
     pub running: bool,
+    pub updating: bool,
     pub probing: bool,
     pub direct: bool,
     pub host: String,
@@ -127,6 +131,7 @@ pub struct WorkflowView {
 
 pub struct RefView {
     pub key: String,
+    pub name: String,
     pub thumb: Option<String>,
     pub can_pick: bool,
     pub filled: bool,
@@ -187,7 +192,8 @@ pub struct AdvancedView {
 
 pub struct PickerView {
     pub title: String,
-    pub options: Vec<(String, bool)>,
+    /// (稳定命中 id, 展示文本, 是否当前值)
+    pub options: Vec<(String, String, bool)>,
 }
 
 pub struct LightboxView {
@@ -201,6 +207,7 @@ pub struct LightboxView {
 
 /// 生成面板一帧的全部输入（锁内构建，渲染闭包只读）。
 pub struct PanelSnapshot {
+    pub width: f32,
     pub status: StatusView,
     pub error: String,
     pub notice: String,
@@ -246,6 +253,7 @@ impl PanelSnapshot {
             managed: core.settings.process_mode == ProcessMode::Managed,
             starting: core.host.starting,
             running: core.host.running,
+            updating: core.host.updating,
             probing: snap.probing,
             direct: online,
             host: core.settings.host.clone(),
@@ -279,6 +287,7 @@ impl PanelSnapshot {
                     filled: !filename.is_empty(),
                     thumb,
                     online,
+                    name: filename,
                     key,
                 }
             })
@@ -364,6 +373,7 @@ impl PanelSnapshot {
         });
 
         Self {
+            width: surface.0,
             status,
             error: snap.error.clone(),
             notice: session.notice.clone(),
@@ -389,7 +399,12 @@ impl PanelSnapshot {
 fn picker_view(picker: &Picker) -> PickerView {
     PickerView {
         title: picker.title.clone(),
-        options: picker.options.iter().map(|option| (option.label.clone(), option.current)).collect(),
+        options: picker
+            .options
+            .iter()
+            .zip(&picker.ids)
+            .map(|(option, id)| (id.clone(), option.label.clone(), option.current))
+            .collect(),
     }
 }
 
@@ -443,7 +458,7 @@ fn field_view(field: &FieldSpec, draft: &Value, seed_mode: &BTreeSet<String>) ->
         label,
         control,
         seed_on: seed_mode.contains(&key),
-        seed: field.is_seed.then(|| format!("{P_SEED}{key}")),
+        seed: (field.is_seed && !field.connected).then(|| format!("{P_SEED}{key}")),
     }
 }
 
@@ -473,7 +488,7 @@ pub fn panel_frame(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
                 cells.caption(snapshot.notice.clone());
             }
             if let Some(lightbox) = &snapshot.lightbox {
-                lightbox_panel(cells, lightbox);
+                lightbox_panel(cells, lightbox, snapshot.width);
             } else {
                 flow_section(cells, snapshot);
             }
@@ -499,16 +514,22 @@ fn status_bar(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
         } else {
             ("未连接".to_string(), ColorToken::TextMuted)
         };
-        row.text_styled(text, TextStyle::new(TextRole::Heading).color(color));
+        row.text_styled(
+            gallery::clip_text(&text, 260.0, 12.0),
+            TextStyle::new(TextRole::Heading).color(color),
+        );
         if let Some(queue) = &status.queue {
             row.caption(queue.clone());
         }
         if let Some(vram) = &status.vram {
             row.caption(vram.clone());
         }
-        if status.managed {
+        if status.updating {
+            row.caption("更新中…");
+        } else if status.managed {
             if status.starting {
                 row.caption("启动中…");
+                row.ghost_button(ID_STOP, "取消启动");
             } else if status.running {
                 row.ghost_button(ID_STOP, "停止服务");
             } else {
@@ -535,7 +556,7 @@ fn flow_section(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
     }
 }
 
-fn lightbox_panel(ui: &mut Ui<'_, '_>, lightbox: &LightboxView) {
+fn lightbox_panel(ui: &mut Ui<'_, '_>, lightbox: &LightboxView, width: f32) {
     ui.panel(|card| {
         card.row(8.0, |head| {
             head.text(lightbox.title.clone(), TextRole::Heading);
@@ -548,12 +569,32 @@ fn lightbox_panel(ui: &mut Ui<'_, '_>, lightbox: &LightboxView) {
             }
             None => card.caption("副本未就绪"),
         }
-        card.row(8.0, |actions| {
-            actions.ghost_button_enabled(ID_LB_COPY_PROMPT, "复制提示词", lightbox.can_copy_prompt);
-            actions.ghost_button(ID_LB_COPY_IMAGE, "复制图片");
-            actions.ghost_button_enabled(ID_LB_ARCHIVE, if lightbox.saved { "已存到仓库" } else { "存到仓库" }, !lightbox.saved);
-            actions.ghost_button(ID_LB_SAVE_AS, "另存为…");
-        });
+        // 窄面下动作拆两行，避免最后两个按钮被裁到可视区外。
+        if width < 420.0 {
+            card.row(8.0, |actions| {
+                actions.ghost_button_enabled(ID_LB_COPY_PROMPT, "复制提示词", lightbox.can_copy_prompt);
+                actions.ghost_button(ID_LB_COPY_IMAGE, "复制图片");
+            });
+            card.row(8.0, |actions| {
+                actions.ghost_button_enabled(
+                    ID_LB_ARCHIVE,
+                    if lightbox.saved { "已存到仓库" } else { "存到仓库" },
+                    !lightbox.saved,
+                );
+                actions.ghost_button(ID_LB_SAVE_AS, "另存为…");
+            });
+        } else {
+            card.row(8.0, |actions| {
+                actions.ghost_button_enabled(ID_LB_COPY_PROMPT, "复制提示词", lightbox.can_copy_prompt);
+                actions.ghost_button(ID_LB_COPY_IMAGE, "复制图片");
+                actions.ghost_button_enabled(
+                    ID_LB_ARCHIVE,
+                    if lightbox.saved { "已存到仓库" } else { "存到仓库" },
+                    !lightbox.saved,
+                );
+                actions.ghost_button(ID_LB_SAVE_AS, "另存为…");
+            });
+        }
     });
 }
 
@@ -565,7 +606,7 @@ fn dock(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
             prompt_block(dock, prompt);
         }
         if let Some(sizing) = &snapshot.sizing {
-            sizing_block(dock, sizing);
+            sizing_block(dock, sizing, snapshot.width);
         }
         run_row(dock, snapshot);
         let title = if snapshot.params_open {
@@ -582,7 +623,11 @@ fn workflow_row(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
     ui.column(4.0, |block| {
         block.row(8.0, |row| {
             row.text("工作流", TextRole::Label);
-            let label = if workflow.current.is_empty() { "选择工作流".to_string() } else { workflow.current.clone() };
+            let label = if workflow.current.is_empty() {
+                "选择工作流".to_string()
+            } else {
+                gallery::clip_text(&workflow.current, 180.0, 12.0)
+            };
             row.button(ID_WF, label);
             row.ghost_button_enabled(ID_SAVE_WF, "存参", workflow.has);
         });
@@ -605,7 +650,16 @@ fn ref_strip(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
                 row.column(4.0, |card| {
                     match &slot.thumb {
                         Some(path) => card.image_fit(ImageSource::Private { path: path.clone() }, REF_THUMB_H, ImageFit::Cover),
-                        None => card.caption(if slot.online { "未选择" } else { "离线" }),
+                        None => {
+                            let label = if slot.filled {
+                                slot.name.clone()
+                            } else if slot.online {
+                                "未选择".to_string()
+                            } else {
+                                "离线".to_string()
+                            };
+                            card.caption(label);
+                        }
                     }
                     card.row(4.0, |actions| {
                         actions.ghost_button_enabled(format!("{P_UPLOAD}{}", slot.key), "上传", slot.online);
@@ -637,29 +691,44 @@ fn prompt_block(ui: &mut Ui<'_, '_>, prompt: &PromptView) {
     });
 }
 
-fn sizing_block(ui: &mut Ui<'_, '_>, sizing: &SizingView) {
+fn sizing_block(ui: &mut Ui<'_, '_>, sizing: &SizingView, width: f32) {
     ui.column(4.0, |block| {
-        if !sizing.cells.is_empty() || !sizing.numbers.is_empty() {
+        if width < 420.0 {
+            if !sizing.cells.is_empty() {
+                block.row(8.0, |row| size_cells(row, &sizing.cells));
+            }
+            if !sizing.numbers.is_empty() {
+                block.row(8.0, |row| size_numbers(row, &sizing.numbers));
+            }
+        } else if !sizing.cells.is_empty() || !sizing.numbers.is_empty() {
             block.row(8.0, |row| {
-                for cell in &sizing.cells {
-                    row.column(2.0, |column| {
-                        column.field_label(cell.label);
-                        let label = if cell.selected.is_empty() { "选择".to_string() } else { cell.selected.clone() };
-                        column.button(cell.id, label);
-                    });
-                }
-                for number in &sizing.numbers {
-                    row.column(2.0, |column| {
-                        column.field_label(number.label.clone());
-                        column.text_input(number.id, number.value.clone(), "");
-                    });
-                }
+                size_cells(row, &sizing.cells);
+                size_numbers(row, &sizing.numbers);
             });
         }
         if !sizing.summary.is_empty() {
             block.caption(sizing.summary.clone());
         }
     });
+}
+
+fn size_cells(row: &mut Ui<'_, '_>, cells: &[SizeCell]) {
+    for cell in cells {
+        row.column(2.0, |column| {
+            column.field_label(cell.label);
+            let label = if cell.selected.is_empty() { "选择".to_string() } else { cell.selected.clone() };
+            column.button(cell.id, label);
+        });
+    }
+}
+
+fn size_numbers(row: &mut Ui<'_, '_>, numbers: &[NumberCell]) {
+    for number in numbers {
+        row.column(2.0, |column| {
+            column.field_label(number.label.clone());
+            column.text_input(number.id, number.value.clone(), "");
+        });
+    }
 }
 
 fn run_row(ui: &mut Ui<'_, '_>, snapshot: &PanelSnapshot) {
@@ -703,12 +772,12 @@ fn picker_panel(ui: &mut Ui<'_, '_>, picker: &PickerView) {
             head.ghost_button(ID_PICKER_CLOSE, "关闭");
         });
         card.scroll_sized("picker_scroll", picker_height(picker.options.len()), 6.0, false, |list| {
-            for (index, (label, current)) in picker.options.iter().enumerate() {
-                let id = format!("{P_PICK}{index}");
+            for (id, label, current) in &picker.options {
+                let control = format!("{P_PICK}{id}");
                 if *current {
-                    list.button(id, label.clone());
+                    list.button(control, label.clone());
                 } else {
-                    list.ghost_button(id, label.clone());
+                    list.ghost_button(control, label.clone());
                 }
             }
         });
@@ -758,7 +827,15 @@ pub struct ProcessView {
     pub reason: String,
 }
 
+pub struct UpdateView {
+    pub can_update: bool,
+    pub updating: bool,
+    pub status: String,
+    pub is_error: bool,
+}
+
 pub struct SettingsSnapshot {
+    pub error: String,
     pub host: String,
     pub port: String,
     pub managed: bool,
@@ -766,7 +843,9 @@ pub struct SettingsSnapshot {
     pub python_path: String,
     pub extra_args: String,
     pub archive_folder: String,
+    pub start_line: String,
     pub process: ProcessView,
+    pub update: UpdateView,
 }
 
 impl SettingsSnapshot {
@@ -788,7 +867,23 @@ impl SettingsSnapshot {
         } else {
             host.died.clone()
         };
+        let update_status = if host.updating {
+            "更新中…".to_string()
+        } else if !host.update_error.is_empty() {
+            host.update_error.clone()
+        } else if !host.update_notice.is_empty() {
+            host.update_notice.clone()
+        } else {
+            host.update_log.lines().last().unwrap_or("").to_string()
+        };
+        let update = UpdateView {
+            can_update: !settings.comfy_dir.trim().is_empty() && !host.updating && !host.starting,
+            updating: host.updating,
+            status: update_status,
+            is_error: !host.updating && !host.update_error.is_empty(),
+        };
         Self {
+            error: core.runtime.snap.error.clone(),
             host: settings.host.clone(),
             port: settings.port.to_string(),
             managed: settings.process_mode == ProcessMode::Managed,
@@ -796,7 +891,9 @@ impl SettingsSnapshot {
             python_path: settings.python_path.clone(),
             extra_args: settings.extra_args.clone(),
             archive_folder: settings.archive_folder.clone(),
+            start_line: host.start_line.clone(),
             process: ProcessView { state, running: host.running, starting: host.starting, reason },
+            update,
         }
     }
 }
@@ -805,6 +902,15 @@ pub fn settings_frame(ui: &mut Ui<'_, '_>, snapshot: &SettingsSnapshot) {
     ui.scroll("settings_scroll", 10.0, |page| {
         page.pad(16.0, 12.0, |body| {
             body.column(12.0, |sections| {
+                if !snapshot.error.is_empty() {
+                    sections.row(8.0, |row| {
+                        row.button(ID_CLEAR_ERROR, "关闭");
+                        row.text_styled(
+                            snapshot.error.clone(),
+                            TextStyle::new(TextRole::Label).color(ColorToken::Danger).wrap(),
+                        );
+                    });
+                }
                 sections.text("连接", TextRole::Heading);
                 sections.panel(|panel| {
                     panel.row(8.0, |row| {
@@ -837,12 +943,17 @@ pub fn settings_frame(ui: &mut Ui<'_, '_>, snapshot: &SettingsSnapshot) {
                             row.text("附加参数", TextRole::Label);
                             row.text_input(SET_EXTRA, snapshot.extra_args.clone(), "");
                         });
+                        if !snapshot.start_line.is_empty() {
+                            panel.caption(format!("启动命令：{}", snapshot.start_line));
+                        }
                         panel.row(8.0, |row| {
                             row.text(snapshot.process.state.clone(), TextRole::Label);
-                            if snapshot.process.running {
-                                row.ghost_button(ID_STOP, "停止");
-                            } else if !snapshot.process.starting {
-                                row.button(ID_START, "启动");
+                            if snapshot.process.starting {
+                                row.ghost_button_enabled(ID_STOP, "取消启动", !snapshot.update.updating);
+                            } else if snapshot.process.running {
+                                row.ghost_button_enabled(ID_STOP, "停止", !snapshot.update.updating);
+                            } else {
+                                row.button_enabled(ID_START, "启动", !snapshot.update.updating);
                             }
                         });
                         if !snapshot.process.reason.is_empty() {
@@ -850,6 +961,19 @@ pub fn settings_frame(ui: &mut Ui<'_, '_>, snapshot: &SettingsSnapshot) {
                         }
                     });
                 }
+                sections.text("维护", TextRole::Heading);
+                sections.panel(|panel| {
+                    panel.row(8.0, |row| {
+                        row.text("ComfyUI 更新", TextRole::Label);
+                        let label = if snapshot.update.updating { "更新中…" } else { "一键更新" };
+                        row.button_enabled(ID_UPDATE, label, snapshot.update.can_update);
+                    });
+                    panel.caption("在安装目录执行 git pull --ff-only 并按 requirements.txt 更新依赖；托管服务会先停止，完成后自动重启");
+                    if !snapshot.update.status.is_empty() {
+                        let color = if snapshot.update.is_error { ColorToken::Danger } else { ColorToken::TextMuted };
+                        panel.notice(snapshot.update.status.clone(), color);
+                    }
+                });
                 sections.text("保存到仓库", TextRole::Heading);
                 sections.panel(|panel| {
                     panel.row(8.0, |row| {

@@ -31,12 +31,28 @@ fn safe_file_name(file_name: &str) -> String {
         .collect::<String>()
         .trim_start_matches('.')
         .trim()
+        .trim_end_matches(['.', ' '])
         .to_string();
     if cleaned.is_empty() {
-        format!("comfyui-{}.png", chrono::Utc::now().timestamp_millis())
+        return format!("comfyui-{}.png", chrono::Utc::now().timestamp_millis());
+    }
+    // Windows 保留名（CON/NUL/COM1…）不能作为文件名，加前缀避开。
+    let stem = cleaned.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(&cleaned);
+    if is_reserved(stem) {
+        format!("_{cleaned}")
     } else {
         cleaned
     }
+}
+
+/// Windows 保留设备名（扩展名不算，大小写不敏感）。
+fn is_reserved(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit()
+            && upper.as_bytes()[3] != b'0')
 }
 
 /// 落库文件名：加 `comfyui-` 前缀，避免与用户自有文件重名。
@@ -94,9 +110,25 @@ fn numbered_name(name: &str, attempt: u32) -> String {
     }
 }
 
+/// 另存为：把字节写到用户选定的路径（路径已由宿主对话框确认，不走仓库写面）。
+pub fn write_user_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| format!("写入文件失败：{e}"))
+}
+
+/// 上传前读用户选定的本地图片。
+pub fn read_user_file(path: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("读取图片失败：{e}"))
+}
+
 /// 是否超过仓库写面上限：等于上限仍可写，仅超出拒绝。
 fn exceeds_write_limit(len: usize) -> bool {
     len > VAULT_WRITE_LIMIT
+}
+
+/// 落库源：内存字节走二进制写面，私有目录文件走导入面。
+enum ArchiveSource<'a> {
+    Bytes(&'a [u8]),
+    Private(&'a Path),
 }
 
 /// 写入 `{folder}/comfyui-{safe}`（重名自动加序号），返回相对仓库根的路径（斜杠分隔）。
@@ -107,18 +139,7 @@ pub async fn save(ctx: &Context, archive_folder: &str, image_ref: &ImageRef, byt
             VAULT_WRITE_LIMIT / (1024 * 1024)
         ));
     }
-    let folder = folder_of(archive_folder);
-    let name = archive_name(&image_ref.filename);
-    for attempt in 0..MAX_NAME_ATTEMPTS {
-        let relative = format!("{folder}/{}", numbered_name(&name, attempt));
-        let exists = ctx.vault_exists(&relative).await.map_err(|e| format!("检查仓库文件失败：{e}"))?;
-        if exists {
-            continue;
-        }
-        ctx.vault_write_binary(&relative, bytes).await.map_err(|e| format!("写入仓库失败：{e}"))?;
-        return Ok(relative);
-    }
-    Err(format!("同名文件过多，无法在 {folder} 下生成新文件名"))
+    save_source(ctx, archive_folder, image_ref, ArchiveSource::Bytes(bytes)).await
 }
 
 /// 经私有目录导入落库：源是插件私有目录里的副本文件（绝对路径），字节由宿主直接搬运，
@@ -129,6 +150,16 @@ pub async fn save_from_private(
     image_ref: &ImageRef,
     source: &Path,
 ) -> Result<String, String> {
+    save_source(ctx, archive_folder, image_ref, ArchiveSource::Private(source)).await
+}
+
+/// 两条写入路径共用的查重/避让循环。
+async fn save_source(
+    ctx: &Context,
+    archive_folder: &str,
+    image_ref: &ImageRef,
+    source: ArchiveSource<'_>,
+) -> Result<String, String> {
     let folder = folder_of(archive_folder);
     let name = archive_name(&image_ref.filename);
     for attempt in 0..MAX_NAME_ATTEMPTS {
@@ -137,8 +168,15 @@ pub async fn save_from_private(
         if exists {
             continue;
         }
-        let source = source.to_string_lossy().into_owned();
-        ctx.vault_import_file(&relative, &source).await.map_err(|e| format!("导入仓库失败：{e}"))?;
+        match source {
+            ArchiveSource::Bytes(bytes) => {
+                ctx.vault_write_binary(&relative, bytes).await.map_err(|e| format!("写入仓库失败：{e}"))?;
+            }
+            ArchiveSource::Private(path) => {
+                let source = path.to_string_lossy().into_owned();
+                ctx.vault_import_file(&relative, &source).await.map_err(|e| format!("导入仓库失败：{e}"))?;
+            }
+        }
         return Ok(relative);
     }
     Err(format!("同名文件过多，无法在 {folder} 下生成新文件名"))
@@ -154,6 +192,15 @@ mod tests {
         assert_eq!(safe_file_name("..hidden"), "hidden");
         let fallback = safe_file_name("   ");
         assert!(fallback.starts_with("comfyui-") && fallback.ends_with(".png"), "全非法字符走时间戳兜底");
+    }
+
+    #[test]
+    fn trims_trailing_dots_and_avoids_reserved_names() {
+        assert_eq!(safe_file_name("a.png."), "a.png");
+        assert_eq!(safe_file_name("CON"), "_CON");
+        assert_eq!(safe_file_name("nul.txt"), "_nul.txt");
+        assert_eq!(safe_file_name("COM1.png"), "_COM1.png");
+        assert_eq!(safe_file_name("COM0.png"), "COM0.png", "COM0 不是保留名");
     }
 
     #[test]

@@ -23,7 +23,7 @@ const TOOL_DESCRIPTION: &str = "向本机 ComfyUI 提交一次生成。默认用
 可用 workflow 按名字指定工作流（展示名，即下拉里去掉 .json 的名字），用 prompt 覆盖主提示词。\
 结果图会出现在 ComfyUI 面板的结果记录流里。未选工作流、指定名匹配不到或提交失败时返回可读错误。";
 
-/// 注册工具：宿主不支持（旧宿主没有 `ai.registerTool`）时静默降级，工具不出现而已。
+/// 注册工具：失败只记日志，工具不出现而已，不阻断面板。
 pub async fn register(ctx: &Context) {
     let parameters = json!({
         "type": "object",
@@ -49,7 +49,9 @@ pub async fn on_tool_call(app: &std::sync::Arc<App>, params: ToolCallParams) {
     let worker = std::sync::Arc::clone(app);
     app.spawn_task(async move {
         let outcome = run_tool(&worker, &params).await;
-        let _ = worker.ctx.tool_result(&call_id, &outcome.content, outcome.is_error).await;
+        if let Err(err) = worker.ctx.tool_result(&call_id, &outcome.content, outcome.is_error).await {
+            worker.ctx.log_error(&format!("回报 Agent 工具结果失败：{err}"));
+        }
     });
 }
 
@@ -70,8 +72,14 @@ impl Outcome {
 }
 
 async fn run_tool(app: &std::sync::Arc<App>, params: &ToolCallParams) -> Outcome {
-    let workflow_query = arg_text(&params.arguments, "workflow");
-    let prompt_override = arg_text(&params.arguments, "prompt");
+    let workflow_query = match arg_text(&params.arguments, "workflow") {
+        Ok(value) => value,
+        Err(err) => return Outcome::error(err),
+    };
+    let prompt_override = match arg_text(&params.arguments, "prompt") {
+        Ok(value) => value,
+        Err(err) => return Outcome::error(err),
+    };
 
     // 指定了工作流就先切过去：加载、转换、草稿重置全走面板同一通路（含参考图缩略回填）
     if let Some(query) = &workflow_query {
@@ -127,14 +135,17 @@ async fn run_tool(app: &std::sync::Arc<App>, params: &ToolCallParams) -> Outcome
     }
 }
 
-/// 取字符串参数：只认字符串，空白串按缺省；非字符串类型按缺省（schema 已约束模型）。
-fn arg_text(arguments: &Value, key: &str) -> Option<String> {
-    arguments
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
+/// 取字符串参数：缺省/null 按缺省，空白串按缺省；键存在但类型不对时返回可读错误，
+/// 不能静默当成"未指定"去跑面板当前工作流。
+fn arg_text(arguments: &Value, key: &str) -> Result<Option<String>, String> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+        }
+        Some(_) => Err(format!("参数 {key} 必须是字符串")),
+    }
 }
 
 /// 按展示名匹配工作流：先精确、再忽略大小写；零个或多个命中都给出可读原因（候选列前五个），
@@ -222,9 +233,10 @@ mod tests {
     #[test]
     fn arg_text_takes_trimmed_non_empty_strings_only() {
         let args = json!({ "workflow": "  同款  ", "prompt": "  ", "count": 3 });
-        assert_eq!(arg_text(&args, "workflow"), Some("同款".to_string()));
-        assert_eq!(arg_text(&args, "prompt"), None, "空白按缺省");
-        assert_eq!(arg_text(&args, "count"), None, "非字符串按缺省");
-        assert_eq!(arg_text(&args, "absent"), None);
+        assert_eq!(arg_text(&args, "workflow"), Ok(Some("同款".to_string())));
+        assert_eq!(arg_text(&args, "prompt"), Ok(None), "空白按缺省");
+        assert!(arg_text(&args, "count").is_err(), "类型不对要报错，不能猜");
+        assert_eq!(arg_text(&args, "absent"), Ok(None));
+        assert_eq!(arg_text(&json!({ "workflow": null }), "workflow"), Ok(None));
     }
 }

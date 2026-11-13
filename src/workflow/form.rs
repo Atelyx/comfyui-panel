@@ -34,9 +34,6 @@ pub struct FieldSpec {
     pub link_from: Option<String>,
     /// combo 候选：(提交值, 展示名)，无候选为 None。
     pub options: Option<Vec<(String, String)>>,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-    pub step: Option<f64>,
     pub multiline: bool,
     /// 输入名是 seed/noise_seed → 可在提交前重随机。
     pub is_seed: bool,
@@ -122,15 +119,6 @@ fn kind_of(schema: Option<&Value>, value: &Value) -> FieldKind {
     }
 }
 
-/// schema 的第二个元素（约束字典）里取数字型约束；非数字（如 `"default"` 字符串）跳过。
-fn number_option(schema: Option<&Value>, key: &str) -> Option<f64> {
-    schema?
-        .as_array()?
-        .get(1)?
-        .get(key)?
-        .as_f64()
-}
-
 /// 按节点与输入声明顺序推导全部字段。`object_info` 为 None 时全部退化为按值类型推断。
 pub fn build_fields(prompt: &Value, object_info: Option<&Value>) -> Vec<FieldSpec> {
     let Some(prompt_map) = prompt.as_object() else {
@@ -170,9 +158,6 @@ pub fn build_fields(prompt: &Value, object_info: Option<&Value>) -> Vec<FieldSpe
                 connected: link.is_some(),
                 link_from: link.as_ref().map(|(id, slot)| format!("{id}:{slot}")),
                 options,
-                min: number_option(schema, "min"),
-                max: number_option(schema, "max"),
-                step: number_option(schema, "step"),
                 multiline: schema
                     .and_then(Value::as_array)
                     .and_then(|arr| arr.get(1))
@@ -216,8 +201,12 @@ pub fn coerce_field_value(field: &FieldSpec, raw: &Value) -> Value {
     match field.kind {
         FieldKind::Boolean => match raw {
             Value::Bool(b) => Value::Bool(*b),
-            Value::String(s) => Value::Bool(s == "true"),
-            _ => Value::Bool(false),
+            Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Value::Bool(true),
+                "false" | "0" | "no" | "off" => Value::Bool(false),
+                _ => raw.clone(),
+            },
+            _ => raw.clone(),
         },
         FieldKind::Int | FieldKind::Float => {
             let num = match raw {
@@ -228,7 +217,11 @@ pub fn coerce_field_value(field: &FieldSpec, raw: &Value) -> Value {
             match num {
                 Some(n) if n.is_finite() => {
                     if field.kind == FieldKind::Int {
-                        Value::Number(Number::from(n.trunc() as i64))
+                        if n < i64::MIN as f64 || n > i64::MAX as f64 {
+                            raw.clone()
+                        } else {
+                            Value::Number(Number::from(n.trunc() as i64))
+                        }
                     } else {
                         Value::from(n)
                     }
@@ -290,7 +283,16 @@ pub fn apply_seed_mode(prompt: &Value, seed_mode: &BTreeSet<String>) -> Value {
             continue;
         }
         let (node_id, input) = (&key[..dot], &key[dot + 1..]);
-        if next.get(node_id).is_none() {
+        // 连线输入是结构，不是字面量种子：即使勾选集合里残留该键也不覆盖。
+        let connected = {
+            let Some(map) = next.as_object() else { return next };
+            map.get(node_id)
+                .and_then(|node| node.get("inputs"))
+                .and_then(Value::as_object)
+                .and_then(|inputs| inputs.get(input))
+                .is_some_and(|value| as_link(value, map).is_some())
+        };
+        if connected {
             continue;
         }
         write_field(&mut next, node_id, input, Value::from(random_seed()));
@@ -530,6 +532,16 @@ mod tests {
     }
 
     #[test]
+    fn coerce_rejects_out_of_range_int_and_unknown_bool_text() {
+        let field = FieldSpec { kind: FieldKind::Int, ..string_field() };
+        assert_eq!(coerce_field_value(&field, &json!(1e30)), json!(1e30), "超出 i64 原样保留");
+        let boolean = FieldSpec { kind: FieldKind::Boolean, ..string_field() };
+        assert_eq!(coerce_field_value(&boolean, &json!("True")), json!(true));
+        assert_eq!(coerce_field_value(&boolean, &json!("0")), json!(false));
+        assert_eq!(coerce_field_value(&boolean, &json!("maybe")), json!("maybe"), "未知布尔文本保留");
+    }
+
+    #[test]
     fn coerce_int_truncates_toward_zero_and_keeps_bad_json() {
         let field = FieldSpec { kind: FieldKind::Int, ..string_field() };
         assert_eq!(coerce_field_value(&field, &json!("3.9")), json!(3));
@@ -537,6 +549,18 @@ mod tests {
         let jf = FieldSpec { kind: FieldKind::Json, ..string_field() };
         assert_eq!(coerce_field_value(&jf, &json!("[1,2]")), json!([1, 2]));
         assert_eq!(coerce_field_value(&jf, &json!("not json")), json!("not json"));
+    }
+
+    #[test]
+    fn seed_mode_never_overwrites_a_connected_seed() {
+        let prompt = json!({
+            "1": {"class_type": "PrimitiveInt", "inputs": {"value": 1}},
+            "2": {"class_type": "KSampler", "inputs": {"seed": ["1", 0], "steps": 20}},
+        });
+        let mut keys = BTreeSet::new();
+        keys.insert("2.seed".to_string());
+        let out = apply_seed_mode(&prompt, &keys);
+        assert_eq!(out["2"]["inputs"]["seed"], json!(["1", 0]), "连线不能被随机数替换");
     }
 
     #[test]
@@ -692,9 +716,6 @@ mod tests {
             connected: false,
             link_from: None,
             options: None,
-            min: None,
-            max: None,
-            step: None,
             multiline: false,
             is_seed: false,
         }

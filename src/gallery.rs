@@ -730,7 +730,7 @@ fn command_inside(command: &DrawCommand, visible: atelyx_plugin_sdk::frame_ui::R
 
 /// 领域键的 128 位散列：同一键恒定同一 id，不同键不碰撞（千级条目量下概率可忽略）。
 /// 命中 id 长度受宿主 64 字节上限约束，promptId 与结果 key 一律散列后再拼前缀。
-fn digest(key: &str) -> String {
+pub(crate) fn digest(key: &str) -> String {
     let (hi, lo) = hash128(key.as_bytes());
     format!("{hi:016x}{lo:016x}")
 }

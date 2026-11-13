@@ -155,48 +155,54 @@ pub fn convert_ui_to_api(raw: &Value) -> Result<Value, String> {
         if excluded.contains(&id) {
             continue;
         }
+        // 同一 id 出现两次会让后一个节点静默覆盖前一个（连同它的连线目标），直接中止。
+        if prompt.contains_key(&id) {
+            return Err(format!("节点 id 重复：{id}"));
+        }
         let mut inputs = Map::new();
         let positional = node.get("widgets_values").and_then(Value::as_array);
         let named = node.get("widgets_values_named").and_then(Value::as_object);
         let mut widget_idx = 0usize;
         for input in node.get("inputs").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object) {
             let Some(name) = input.get("name").and_then(Value::as_str) else { continue };
-            // 连线输入：link 为 null 时 id_key 返回 None，自然落回字面量分支
-            if let Some(link_id) = id_key(input.get("link")) {
-                if let Some((origin, slot)) = link_by_id.get(&link_id) {
-                    if let Some((resolved_id, resolved_slot)) = resolve_origin(origin.clone(), *slot) {
-                        inputs.insert(name.to_string(), Value::Array(vec![
-                            Value::String(resolved_id),
-                            Value::from(resolved_slot),
-                        ]));
+            let has_widget = input.get("widget").map(|w| !w.is_null()).unwrap_or(false);
+            if !has_widget {
+                // 普通 socket：只有连线才进 prompt。
+                if let Some(link_id) = id_key(input.get("link")) {
+                    if let Some((origin, slot)) = link_by_id.get(&link_id) {
+                        if let Some((resolved_id, resolved_slot)) = resolve_origin(origin.clone(), *slot) {
+                            inputs.insert(name.to_string(), link_value(resolved_id, resolved_slot));
+                        }
                     }
                 }
                 continue;
             }
-            // 非 widget 输入跳过
-            let has_widget = input.get("widget").map(|w| !w.is_null()).unwrap_or(false);
-            if !has_widget {
+            // widget 与 socket 在当前前端共存：已连线 widget 的值仍占 widgets_values 的一个槽位，
+            // 槽位必须照常前进，否则后续 widget 会整体前移（seed 还要跳过 control_after_generate）。
+            let slot = widget_idx;
+            widget_idx += 1;
+            if SEED_INPUTS.contains(&name) {
+                widget_idx += 1;
+            }
+            if let Some(link_id) = id_key(input.get("link")) {
+                if let Some((origin, slot)) = link_by_id.get(&link_id) {
+                    if let Some((resolved_id, resolved_slot)) = resolve_origin(origin.clone(), *slot) {
+                        inputs.insert(name.to_string(), link_value(resolved_id, resolved_slot));
+                    }
+                }
                 continue;
             }
-            // 字面量：有 named 按名取，否则按序从 widgets_values 取
-            if let Some(named_map) = named {
+            // 字面量：命名值优先，缺键时回退到同槽位的按序值。
+            let named_value = named.and_then(|named_map| {
                 let widget_name = input.get("widget").and_then(|w| w.get("name")).and_then(Value::as_str);
-                let value = named_map
+                named_map
                     .get(name)
-                    .or_else(|| widget_name.and_then(|wn| named_map.get(wn)));
-                match value {
-                    Some(v) => inputs.insert(name.to_string(), v.clone()),
-                    None => None,
-                };
-            } else if let Some(list) = positional {
-                if widget_idx >= list.len() {
-                    continue;
-                }
-                inputs.insert(name.to_string(), list[widget_idx].clone());
-                widget_idx += 1;
-                if SEED_INPUTS.contains(&name) && widget_idx < list.len() {
-                    widget_idx += 1;
-                }
+                    .or_else(|| widget_name.and_then(|wn| named_map.get(wn)))
+                    .cloned()
+            });
+            let value = named_value.or_else(|| positional.and_then(|list| list.get(slot)).cloned());
+            if let Some(value) = value {
+                inputs.insert(name.to_string(), value);
             }
         }
         let mut entry = Map::new();
@@ -214,28 +220,8 @@ pub fn convert_ui_to_api(raw: &Value) -> Result<Value, String> {
         return Err("没有可执行的节点".into());
     }
 
-    // 悬空连线收尾：引用指向不在 prompt 里的节点的删掉。先只读收集待删坐标，再逐个删除，
-    // 避免边遍历边改。
-    let mut dangling: Vec<(String, String)> = Vec::new();
-    for (node_id, node) in prompt.iter() {
-        let Some(inputs) = node.get("inputs").and_then(Value::as_object) else { continue };
-        for (name, value) in inputs.iter() {
-            let Some(arr) = value.as_array() else { continue };
-            if arr.len() != 2 || !arr[0].is_string() {
-                continue;
-            }
-            let target = arr[0].as_str().unwrap();
-            if !prompt.contains_key(target) {
-                dangling.push((node_id.clone(), name.clone()));
-            }
-        }
-    }
-    for (node_id, name) in dangling {
-        if let Some(inputs) = prompt.get_mut(&node_id).and_then(|n| n.get_mut("inputs")).and_then(Value::as_object_mut) {
-            inputs.remove(&name);
-        }
-    }
-
+    // 指向被剔除节点的连线在 resolve_origin 已返回 None，不会进 prompt；这里不再按
+    // 「2 元素数组」猜测清理——那会把合法的字面量列表（如自定义节点的 ["a", "b"]）误删。
     Ok(Value::Object(prompt))
 }
 
@@ -251,6 +237,19 @@ pub fn apply_draft_to_ui(raw: &mut Value, prompt: &Value) -> Result<(), String> 
     let Some(nodes) = workflow.get_mut("nodes").and_then(Value::as_array_mut) else {
         return Err("不是可识别的工作流 JSON（缺少 nodes 数组）".into());
     };
+    // 草稿里的节点在文件里不存在说明结构已被外部改动：中止，避免把值写进不确定的目标。
+    let file_ids: HashSet<String> = nodes
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|node| id_key(node.get("id")))
+        .collect();
+    if let Some(prompt_map) = prompt.as_object() {
+        for id in prompt_map.keys() {
+            if !file_ids.contains(id) {
+                return Err(format!("工作流结构已变化：节点 {id} 不存在，请重新载入后再保存"));
+            }
+        }
+    }
     let excluded: HashSet<String> = nodes
         .iter()
         .filter_map(Value::as_object)
@@ -278,19 +277,25 @@ pub fn apply_draft_to_ui(raw: &mut Value, prompt: &Value) -> Result<(), String> 
         let mut widget_idx = 0usize;
         for input in inputs.iter().filter_map(Value::as_object) {
             let Some(name) = input.get("name").and_then(Value::as_str) else { continue };
-            let has_link = input.get("link").map(|l| !l.is_null()).unwrap_or(false);
             let has_widget = input.get("widget").map(|w| !w.is_null()).unwrap_or(false);
-            if has_link || !has_widget {
+            if !has_widget {
                 continue;
             }
-            // 每个 widget 输入占一个按序槽位，seed 输入再跳过其后的 control_after_generate 槽。
+            // widget 与 socket 共存：已连线 widget 仍占一个按序槽位，槽位必须照常前进。
             // 即使草稿缺这个值，槽位也照常前进——否则后续输入会整体错位写进别的 widget。
             let slot = widget_idx;
             widget_idx += 1;
             if SEED_INPUTS.contains(&name) {
                 widget_idx += 1;
             }
+            if input.get("link").map(|l| !l.is_null()).unwrap_or(false) {
+                continue;
+            }
             let Some(value) = entry_inputs.get(name) else { continue };
+            // 连线引用是结构而非 widget 值：外部改动后草稿里可能残留，不能写进 widgets_values。
+            if is_link_shape(value) {
+                continue;
+            }
             if let Some(map) = named_map.as_ref() {
                 named_writes.push((name.to_string(), value.clone()));
                 if let Some(wn) = input.get("widget").and_then(|w| w.get("name")).and_then(Value::as_str) {
@@ -322,6 +327,17 @@ pub fn apply_draft_to_ui(raw: &mut Value, prompt: &Value) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// 连线引用 [节点id, 槽位] 的形状判定（只用于写回时拒绝把结构写进 widget 值）。
+fn is_link_shape(value: &Value) -> bool {
+    let Some(arr) = value.as_array() else { return false };
+    arr.len() == 2 && (arr[0].is_string() || arr[0].is_number()) && arr[1].is_i64()
+}
+
+/// 转换时写入 prompt 的连线引用。
+fn link_value(node_id: String, slot: i64) -> Value {
+    Value::Array(vec![Value::String(node_id), Value::from(slot)])
 }
 
 #[cfg(test)]
@@ -395,5 +411,108 @@ mod tests {
         apply_draft_to_ui(&mut raw, &prompt).unwrap();
         assert_eq!(raw["nodes"][0]["widgets_values_named"], json!({"foo": "X", "bar": "Y"}));
         assert_eq!(raw["nodes"][0]["widgets_values"], json!(["X", "Y"]));
+    }
+
+    /// 已连线 widget 仍占 widgets_values 槽位：seed 连线后 steps/cfg 不能读到 seed 的值。
+    #[test]
+    fn linked_widget_still_advances_positional_slot() {
+        let raw = json!({
+            "nodes": [
+                {"id": 1, "type": "PrimitiveInt", "inputs": [], "widgets_values": [42]},
+                {
+                    "id": 2, "type": "KSampler",
+                    "inputs": [
+                        {"name": "model", "type": "MODEL", "link": null},
+                        {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": 10},
+                        {"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": null},
+                        {"name": "cfg", "type": "FLOAT", "widget": {"name": "cfg"}, "link": null},
+                        {"name": "sampler_name", "type": "COMBO", "widget": {"name": "sampler_name"}, "link": null},
+                    ],
+                    "widgets_values": [123, "randomize", 20, 8.0, "euler"],
+                },
+            ],
+            "links": [[10, 1, 0, 2, 1, "INT"]],
+        });
+        let prompt = convert_ui_to_api(&raw).unwrap();
+        let inputs = &prompt["2"]["inputs"];
+        assert_eq!(inputs["seed"], json!(["1", 0]), "连线照常写入");
+        assert_eq!(inputs["steps"], json!(20), "steps 不能被 seed 的值顶替");
+        assert_eq!(inputs["cfg"], json!(8.0));
+        assert_eq!(inputs["sampler_name"], json!("euler"));
+    }
+
+    /// 2 元素字符串数组是合法字面量，不能被当成悬空连线删掉。
+    #[test]
+    fn literal_two_element_array_survives() {
+        let raw = json!({
+            "nodes": [{
+                "id": 3, "type": "CustomList",
+                "inputs": [{"name": "tags", "widget": {"name": "tags"}, "link": null}],
+                "widgets_values": [["cat", "dog"]],
+            }],
+        });
+        let prompt = convert_ui_to_api(&raw).unwrap();
+        assert_eq!(prompt["3"]["inputs"]["tags"], json!(["cat", "dog"]));
+    }
+
+    #[test]
+    fn duplicate_node_ids_are_rejected() {
+        let raw = json!({
+            "nodes": [
+                {"id": 1, "type": "K", "inputs": []},
+                {"id": 1, "type": "K", "inputs": []},
+            ],
+        });
+        assert!(convert_ui_to_api(&raw).unwrap_err().contains("节点 id 重复"));
+    }
+
+    /// named 缺键时回退到同槽位的按序值，读写两侧口径一致。
+    #[test]
+    fn named_missing_key_falls_back_to_positional() {
+        let raw = json!({
+            "nodes": [{
+                "id": 5, "type": "K",
+                "inputs": [
+                    {"name": "foo", "widget": {"name": "foo"}, "link": null},
+                    {"name": "bar", "widget": {"name": "bar"}, "link": null},
+                ],
+                "widgets_values_named": {"foo": "X"},
+                "widgets_values": ["X", "Y"],
+            }],
+        });
+        let prompt = convert_ui_to_api(&raw).unwrap();
+        assert_eq!(prompt["5"]["inputs"]["foo"], json!("X"));
+        assert_eq!(prompt["5"]["inputs"]["bar"], json!("Y"));
+    }
+
+    /// 写回时已连线 widget 的槽位照常前进，后续值写进正确位置。
+    #[test]
+    fn draft_write_skips_linked_widget_slot() {
+        let mut raw = json!({
+            "nodes": [{
+                "id": 2, "type": "KSampler",
+                "inputs": [
+                    {"name": "seed", "widget": {"name": "seed"}, "link": 10},
+                    {"name": "steps", "widget": {"name": "steps"}, "link": null},
+                    {"name": "cfg", "widget": {"name": "cfg"}, "link": null},
+                    {"name": "sampler_name", "widget": {"name": "sampler_name"}, "link": null},
+                ],
+                "widgets_values": [123, "randomize", 20, 8.0, "euler"],
+            }],
+        });
+        let prompt = json!({"2": {"class_type": "KSampler", "inputs": {
+            "seed": ["1", 0], "steps": 30, "cfg": 7.5, "sampler_name": "euler"
+        }}});
+        apply_draft_to_ui(&mut raw, &prompt).unwrap();
+        assert_eq!(raw["nodes"][0]["widgets_values"], json!([123, "randomize", 30, 7.5, "euler"]));
+    }
+
+    #[test]
+    fn draft_node_missing_from_file_is_rejected() {
+        let mut raw = json!({
+            "nodes": [{"id": 1, "type": "K", "inputs": []}],
+        });
+        let prompt = json!({"9": {"class_type": "K", "inputs": {}}});
+        assert!(apply_draft_to_ui(&mut raw, &prompt).unwrap_err().contains("节点 9 不存在"));
     }
 }

@@ -86,7 +86,7 @@ impl SizePlan {
 
 /// 由比例与百万像素算宽高：面积相等，就近取整到 `multiple` 的倍数，下界为一个 `multiple`。
 pub fn size_for_mp(wr: f64, hr: f64, mp: f64, multiple: f64) -> (i64, i64) {
-    let multiple = if multiple > 0.0 { multiple } else { FALLBACK_MULTIPLE };
+    let multiple = if multiple > 0.0 { multiple.max(1.0) } else { FALLBACK_MULTIPLE };
     let mp = if mp > 0.0 && mp.is_finite() { mp } else { 1.0 };
     if !usable_extent(wr) || !usable_extent(hr) {
         return (multiple as i64, multiple as i64);
@@ -101,6 +101,7 @@ fn usable_extent(value: f64) -> bool {
 }
 
 fn snap(n: f64, multiple: f64) -> i64 {
+    let multiple = if multiple > 0.0 { multiple.max(1.0) } else { FALLBACK_MULTIPLE };
     if !n.is_finite() {
         return multiple.round() as i64;
     }
@@ -167,6 +168,11 @@ fn find_in_class<'a>(fields: &'a [FieldSpec], class_type: &str, input: &str) -> 
     fields.iter().find(|f| !f.connected && f.class_type == class_type && f.input == input)
 }
 
+/// 指定节点 id 里未连线的输入字段（选择器路径的 ratio/megapixels/multiple 必须同节点）。
+fn find_in_node<'a>(fields: &'a [FieldSpec], node_id: &str, input: &str) -> Option<&'a FieldSpec> {
+    fields.iter().find(|f| !f.connected && f.node_id == node_id && f.input == input)
+}
+
 /// 分辨率选择器路径的入口字段：带候选清单的 `aspect_ratio`（`plan` 与队列规格判定同源）。
 fn selector_ratio_field(fields: &[FieldSpec]) -> Option<&FieldSpec> {
     find_in_class(fields, "ResolutionSelector", "aspect_ratio")
@@ -207,11 +213,11 @@ fn number_value(n: i64) -> Value {
 pub fn output_size(draft: &Value, fields: &[FieldSpec]) -> Option<(f64, f64)> {
     if let Some(ratio_field) = selector_ratio_field(fields) {
         let (wr, hr) = parse_aspect_pair(&display_value(read_field(draft, ratio_field).as_ref()))?;
-        let mp = find_in_class(fields, "ResolutionSelector", "megapixels")
+        let mp = find_in_node(fields, &ratio_field.node_id, "megapixels")
             .and_then(|field| numeric_value(read_field(draft, field).as_ref()))
             .filter(|value| *value > 0.0 && value.is_finite())
             .unwrap_or(1.0);
-        let multiple = find_in_class(fields, "ResolutionSelector", "multiple")
+        let multiple = find_in_node(fields, &ratio_field.node_id, "multiple")
             .and_then(|field| numeric_value(read_field(draft, field).as_ref()))
             .filter(|value| *value > 0.0 && value.is_finite())
             .unwrap_or(FALLBACK_MULTIPLE);
@@ -243,12 +249,21 @@ pub fn plan(draft: &Value, fields: &[FieldSpec]) -> SizePlan {
 
     if let Some(selector_field) = selector {
         let ratio_value = display_value(read_field(draft, selector_field).as_ref());
-        let options = selector_field
+        let selector_node = selector_field.node_id.clone();
+        // 当前比例不在候选里时追加一项，保证选中态在界面上总能找到对应项。
+        let mut values: Vec<String> = selector_field
             .options
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .map(|(value, _)| SizeOption {
+            .map(|(value, _)| value)
+            .collect();
+        if !ratio_value.is_empty() && !values.contains(&ratio_value) {
+            values.push(ratio_value.clone());
+        }
+        let options = values
+            .into_iter()
+            .map(|value| SizeOption {
                 label: aspect_label(&value).to_string(),
                 writes: vec![write_of(selector_field, &value)],
                 hint: None,
@@ -263,10 +278,12 @@ pub fn plan(draft: &Value, fields: &[FieldSpec]) -> SizePlan {
             options,
         });
 
-        if let Some(mp_field) = find_in_class(fields, "ResolutionSelector", "megapixels") {
-            let current_mp = numeric_value(read_field(draft, mp_field).as_ref()).unwrap_or(1.0);
+        if let Some(mp_field) = find_in_node(fields, &selector_node, "megapixels") {
+            let current_mp = numeric_value(read_field(draft, mp_field).as_ref())
+                .filter(|value| *value > 0.0 && value.is_finite())
+                .unwrap_or(1.0);
             let multiple = positive_or(
-                find_in_class(fields, "ResolutionSelector", "multiple")
+                find_in_node(fields, &selector_node, "multiple")
                     .and_then(|f| numeric_value(read_field(draft, f).as_ref())),
                 FALLBACK_MULTIPLE,
             );
@@ -425,9 +442,6 @@ mod tests {
             connected: false,
             link_from: None,
             options: None,
-            min: None,
-            max: None,
-            step: None,
             multiline: false,
             is_seed: false,
         }
@@ -660,5 +674,55 @@ mod tests {
         let plan = plan(&draft, &[field("8", "K", "batch_size", FieldKind::Int)]);
         assert_eq!(plan.sections[0].selected.as_deref(), Some("1"));
         assert_eq!(plan.summary, "1");
+    }
+
+    #[test]
+    fn negative_megapixels_fall_back_to_one() {
+        let draft = json!({"7": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": "1:1", "megapixels": -3.0}}});
+        let mut ratio = field("7", "ResolutionSelector", "aspect_ratio", FieldKind::Combo);
+        ratio.options = Some(vec![("1:1".into(), "1:1".into())]);
+        let fields = vec![ratio, field("7", "ResolutionSelector", "megapixels", FieldKind::Float)];
+        let plan = plan(&draft, &fields);
+        assert_eq!(plan.sections[1].selected.as_deref(), Some("1"));
+        assert_eq!(plan.summary, "1:1 · 1K");
+        assert_eq!(plan.detail.as_deref(), Some("1024:1024"));
+        assert!(!plan.sections[1].options.iter().any(|o| o.value == "-3"), "非法当前值不应成为选项");
+    }
+
+    #[test]
+    fn selector_fields_are_scoped_to_the_same_node() {
+        // node 7 有比例候选但没有 megapixels；node 8 的 megapixels 不能被借用
+        let draft = json!({
+            "7": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": "1:1"}},
+            "8": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": "16:9", "megapixels": 2.0}},
+        });
+        let mut ratio7 = field("7", "ResolutionSelector", "aspect_ratio", FieldKind::Combo);
+        ratio7.options = Some(vec![("1:1".into(), "1:1".into())]);
+        let mut ratio8 = field("8", "ResolutionSelector", "aspect_ratio", FieldKind::Combo);
+        ratio8.options = Some(vec![("16:9".into(), "16:9".into())]);
+        let fields = vec![
+            ratio7,
+            field("8", "ResolutionSelector", "megapixels", FieldKind::Float),
+            ratio8,
+        ];
+        let plan = plan(&draft, &fields);
+        assert_eq!(plan.detail.as_deref(), Some("1024:1024"), "不能借用另一个选择器的 2MP");
+    }
+
+    #[test]
+    fn current_ratio_outside_options_is_appended() {
+        let draft = json!({"7": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": "5:4", "megapixels": 1.0}}});
+        let mut ratio = field("7", "ResolutionSelector", "aspect_ratio", FieldKind::Combo);
+        ratio.options = Some(vec![("1:1".into(), "1:1".into())]);
+        let fields = vec![ratio, field("7", "ResolutionSelector", "megapixels", FieldKind::Float)];
+        let plan = plan(&draft, &fields);
+        assert_eq!(plan.sections[0].selected.as_deref(), Some("5:4"));
+        assert!(plan.sections[0].options.iter().any(|o| o.value == "5:4"));
+        assert_eq!(plan.sections[0].options.last().unwrap().label, "5:4");
+    }
+
+    #[test]
+    fn fractional_multiple_never_yields_zero_size() {
+        assert_eq!(size_for_mp(1.0, 1.0, 1.0, 0.5), (1024, 1024));
     }
 }

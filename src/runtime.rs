@@ -471,8 +471,9 @@ pub async fn save_workflow(
     http: &reqwest::Client,
     file: &WorkflowFileInfo,
     prompt: &Value,
-) -> Result<(), String> {
-    library::save_workflow_params(&client_for(settings, http), file, prompt).await
+    expected_modified: f64,
+) -> Result<library::SaveOutcome, String> {
+    library::save_workflow_params(&client_for(settings, http), file, prompt, expected_modified).await
 }
 
 // ---------- 纯数据辅助（无 IO）----------

@@ -104,7 +104,10 @@ async fn render_attached(app: &Arc<App>) {
 /// 输入框的编辑基线：编辑永远从草稿 / 会话事实出发，不从上一帧的绘制快照出发。
 fn panel_value(app: &Arc<App>, id: &str) -> Option<String> {
     let core = app.core();
-    if let Some(key) = id.strip_prefix(P_NUM).or_else(|| id.strip_prefix(P_TEXT)) {
+    if let Some(key) = id.strip_prefix(P_NUM) {
+        return app::number_text(&core, key);
+    }
+    if let Some(key) = id.strip_prefix(P_TEXT) {
         return app::field_text(&core, key);
     }
     if let Some((input, _)) = views::QUICK_NUMBER_FIELDS.iter().find(|(_, field_id)| *field_id == id) {
@@ -164,20 +167,40 @@ fn lightbox_prompt_id(app: &Arc<App>) -> Option<String> {
     core.runtime.snap.results.iter().find(|item| &item.key == key).map(|item| item.prompt_id.clone())
 }
 
+/// 把需要网络/磁盘/对话框的动作挪到后台运行时：宿主通知 worker 是串行的，
+/// 在输入回调里 await 慢操作会挡住其后的全部通知。
 async fn click_panel(app: &Arc<App>, id: &str) {
     if click_flow(app, id).await {
         return;
     }
     match id {
-        views::ID_REFRESH => app.refresh_status().await,
-        views::ID_OPEN_BROWSER => app.open_browser().await,
+        views::ID_REFRESH => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.refresh_status().await });
+        }
+        views::ID_OPEN_BROWSER => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.open_browser().await });
+        }
         views::ID_CLEAR_ERROR => app.clear_error(),
         views::ID_START => app.start_service(),
         views::ID_STOP => app.stop_service(),
-        views::ID_FREE => app.free_memory().await,
-        views::ID_RUN => app.run_generation().await,
-        views::ID_INTERRUPT => app.interrupt().await,
-        views::ID_SAVE_WF => app.save_current_workflow().await,
+        views::ID_FREE => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.free_memory().await });
+        }
+        views::ID_RUN => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.run_generation().await });
+        }
+        views::ID_INTERRUPT => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.interrupt().await });
+        }
+        views::ID_SAVE_WF => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.save_current_workflow().await });
+        }
         views::ID_WF => app.open_workflow_picker(),
         views::ID_FLOW_MORE => app.show_earlier(),
         views::ID_PARAMS_TOGGLE => app.toggle_params(),
@@ -188,22 +211,26 @@ async fn click_panel(app: &Arc<App>, id: &str) {
         views::ID_LB_CLOSE => app.close_lightbox(),
         views::ID_LB_COPY_PROMPT => {
             if let Some(prompt_id) = lightbox_prompt_id(app) {
-                app.copy_prompt(&prompt_id).await;
+                let worker = app.clone();
+                app.spawn_task(async move { worker.copy_prompt(&prompt_id).await });
             }
         }
         views::ID_LB_COPY_IMAGE => {
             if let Some(key) = lightbox_key(app) {
-                app.copy_result_image(key).await;
+                let worker = app.clone();
+                app.spawn_task(async move { worker.copy_result_image(key).await });
             }
         }
         views::ID_LB_ARCHIVE => {
             if let Some(key) = lightbox_key(app) {
-                app.archive_result(key).await;
+                let worker = app.clone();
+                app.spawn_task(async move { worker.archive_result(key).await });
             }
         }
         views::ID_LB_SAVE_AS => {
             if let Some(key) = lightbox_key(app) {
-                app.save_result_as(key).await;
+                let worker = app.clone();
+                app.spawn_task(async move { worker.save_result_as(key).await });
             }
         }
         _ => click_control(app, id).await,
@@ -219,10 +246,22 @@ async fn click_flow(app: &Arc<App>, id: &str) -> bool {
     };
     match action {
         Some(gallery::FlowAction::Preview(key)) => app.open_lightbox(key).await,
-        Some(gallery::FlowAction::Save(key)) => app.archive_result(key).await,
-        Some(gallery::FlowAction::CopyPrompt(prompt_id)) => app.copy_prompt(&prompt_id).await,
-        Some(gallery::FlowAction::CopyRun) => app.copy_running_prompt().await,
-        Some(gallery::FlowAction::Interrupt) => app.interrupt().await,
+        Some(gallery::FlowAction::Save(key)) => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.archive_result(key).await });
+        }
+        Some(gallery::FlowAction::CopyPrompt(prompt_id)) => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.copy_prompt(&prompt_id).await });
+        }
+        Some(gallery::FlowAction::CopyRun) => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.copy_running_prompt().await });
+        }
+        Some(gallery::FlowAction::Interrupt) => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.interrupt().await });
+        }
         None => return false,
     }
     true
@@ -230,15 +269,21 @@ async fn click_flow(app: &Arc<App>, id: &str) -> bool {
 
 /// 选择面板、节点分组与字段控件：id 前缀即控件类型，键为 `${节点id}.${输入名}`。
 async fn click_control(app: &Arc<App>, id: &str) {
-    if let Some(index) = id.strip_prefix(P_PICK) {
+    if let Some(id) = id.strip_prefix(P_PICK) {
         let action = {
             let mut core = app.core();
-            let picker = core.session.picker.take();
-            picker.and_then(|picker| index.parse::<usize>().ok().and_then(|index| picker.options.get(index).map(|option| option.action.clone())))
+            core.session.picker.take().and_then(|picker| {
+                picker
+                    .ids
+                    .iter()
+                    .position(|item| item.as_str() == id)
+                    .map(|index| picker.options[index].action.clone())
+            })
         };
         app.invalidate();
         if let Some(action) = action {
-            app.apply_picker_action(action).await;
+            let worker = app.clone();
+            app.spawn_task(async move { worker.apply_picker_action(action).await });
         }
         return;
     }
@@ -261,8 +306,16 @@ async fn click_control(app: &Arc<App>, id: &str) {
             };
             app.toggle_seed(key, on);
         }
-        Some(P_UPLOAD) => app.upload_reference(key.to_string()).await,
-        Some(P_PASTE) => app.paste_reference(key.to_string()).await,
+        Some(P_UPLOAD) => {
+            let key = key.to_string();
+            let worker = app.clone();
+            app.spawn_task(async move { worker.upload_reference(key).await });
+        }
+        Some(P_PASTE) => {
+            let key = key.to_string();
+            let worker = app.clone();
+            app.spawn_task(async move { worker.paste_reference(key).await });
+        }
         Some(P_CLEAR) => app.clear_reference(key),
         _ => {}
     }
@@ -307,7 +360,12 @@ async fn apply_settings(app: &Arc<App>, event: UiEvent) {
         UiEvent::Click { id } => match id.as_str() {
             views::ID_START => app.start_service(),
             views::ID_STOP => app.stop_service(),
-            views::SET_DIR_PICK => app.pick_comfy_dir().await,
+            views::ID_UPDATE => app.start_update(),
+            views::ID_CLEAR_ERROR => app.clear_error(),
+            views::SET_DIR_PICK => {
+                let worker = app.clone();
+                app.spawn_task(async move { worker.pick_comfy_dir().await });
+            }
             views::SET_MODE_MANAGED => app.set_process_mode(ProcessMode::Managed),
             views::SET_MODE_EXTERNAL => app.set_process_mode(ProcessMode::External),
             _ => {}

@@ -6,7 +6,7 @@
 //! 装载时清空 `refs/` 目录免跨进程堆积，插件内上传同名图先作废该条再重抓。
 //! 删除范围始终不出私有目录。
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,7 @@ pub struct ResultImage {
     pub saved_path: Option<String>,
     /// 本地副本相对私有目录的路径（`history/{name}`）；抓取成功后写入，缺省表示尚未就绪或抓取失败。
     pub local: Option<String>,
-    /// 原图片素尺寸（副本字节落盘时解析文件头）：画廊格高按它算；缺省（未抓到/旧记录）按方格。
+    /// 原图片素尺寸（副本字节落盘时解析文件头）：画廊格高按它算；缺省按方格。
     pub pixel: Option<(u32, u32)>,
     /// 已补抓的轮数；达到 [`RECAPTURE_ATTEMPTS`] 后不再进入补抓批次。
     pub copy_attempts: u32,
@@ -53,13 +53,35 @@ impl ResultImage {
     }
 }
 
-/// 副本文件名：`{promptId}-{index}{ext}`；扩展名取原文件名末段，无点则按 `.png`。
+/// 副本文件名：`{promptId}-{index}{ext}`。promptId 与扩展名都按文件名片段净化：
+/// 服务端给的字符串可能含分隔符或 `..`，直接拼路径会写出私有目录。
 pub fn copy_name(prompt_id: &str, index: usize, file_name: &str) -> String {
-    let ext = match file_name.rfind('.') {
-        Some(dot) if dot > 0 => &file_name[dot..],
-        _ => ".png",
-    };
-    format!("{prompt_id}-{index}{ext}")
+    format!("{}-{index}{}", safe_component(prompt_id), safe_ext(file_name))
+}
+
+/// 文件名片段：只留 ASCII 字母数字、`-`、`_`，其余换 `_`，限长 80。
+fn safe_component(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(80)
+        .collect();
+    if cleaned.is_empty() { "prompt".to_string() } else { cleaned }
+}
+
+/// 扩展名：只认最后一个点后 1–10 位 ASCII 字母数字，其余按 `.png`；小写归一。
+fn safe_ext(file_name: &str) -> String {
+    let Some(dot) = file_name.rfind('.') else { return ".png".to_string() };
+    let ext = &file_name[dot..];
+    if dot > 0
+        && ext.len() > 1
+        && ext.len() <= 11
+        && ext[1..].chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        ext.to_ascii_lowercase()
+    } else {
+        ".png".to_string()
+    }
 }
 
 /// 补抓副本文件名：`retry-{promptId}-{拍平后的文件名}`。与 [`copy_name`] 的 index 命名
@@ -98,6 +120,17 @@ fn checksum(text: &str) -> u64 {
 /// [`CopyStore`] 的 `save`/`read`/`remove` 一律收这个形式，避免同一副本在读写删三侧口径不一致。
 pub fn copy_path(name: &str) -> String {
     format!("{COPY_DIR}/{name}")
+}
+
+/// 持久化信封里的副本路径是否仍是私有目录内的 `history/...` 相对路径。
+/// 信封可能被手改或损坏，读回后必须过滤，否则淘汰删除会越出私有目录。
+pub fn valid_copy_path(relative: &str) -> bool {
+    if !relative.starts_with(&format!("{COPY_DIR}/")) {
+        return false;
+    }
+    let path = Path::new(relative);
+    !path.is_absolute()
+        && path.components().all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// 参考图缩略副本名：input 目录里的相对路径按 [`safe_stem`] 拍平（扩展名随文件名原样留下）。
@@ -263,37 +296,63 @@ impl RefCache {
 #[derive(Clone)]
 pub struct CopyStore {
     root: PathBuf,
+    enabled: bool,
 }
 
 impl CopyStore {
     /// `root` 取宿主 `fs.privateDir()`（即 `data/`）。
     pub fn new(root: String) -> Self {
-        CopyStore { root: PathBuf::from(root) }
+        CopyStore { root: PathBuf::from(root), enabled: true }
+    }
+
+    /// 私有目录不可用时的空实现：不读写任何文件，避免把副本落到进程 CWD。
+    pub fn disabled() -> Self {
+        CopyStore { root: PathBuf::new(), enabled: false }
     }
 
     /// 确保副本目录存在（私有目录根由宿主建，子目录归本模块）。
     pub fn ensure_dir(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Err("插件私有目录不可用".to_string());
+        }
         std::fs::create_dir_all(self.root.join(COPY_DIR)).map_err(|e| format!("创建副本目录失败：{e}"))
     }
 
     /// 启动准备：建目录并清掉上一代留下的参考图缩略；在阻塞线程上调用。
     pub fn prepare(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
         self.ensure_dir()?;
         self.clear_refs();
         Ok(())
     }
 
-    fn abs(&self, relative: &str) -> PathBuf {
-        self.root.join(relative)
+    /// 相对路径 → 绝对路径；只接受普通组件（拒绝绝对路径、`..`、根/前缀），
+    /// 保证读写删都落在私有目录内。
+    fn abs(&self, relative: &str) -> Option<PathBuf> {
+        if !self.enabled {
+            return None;
+        }
+        let path = Path::new(relative);
+        if path.is_absolute() {
+            return None;
+        }
+        if path.components().any(|component| !matches!(component, Component::Normal(_))) {
+            return None;
+        }
+        Some(self.root.join(path))
     }
 
     /// 副本的绝对路径：宿主仓库导入面（`vault.importFile`）只收私有目录内的绝对路径。
-    pub fn abs_path(&self, relative: &str) -> PathBuf {
+    pub fn abs_path(&self, relative: &str) -> Option<PathBuf> {
         self.abs(relative)
     }
 
     pub fn save(&self, relative: &str, bytes: &[u8]) -> Result<(), String> {
-        let path = self.abs(relative);
+        let Some(path) = self.abs(relative) else {
+            return Err("副本路径非法或私有目录不可用".to_string());
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建副本目录失败：{e}"))?;
         }
@@ -302,12 +361,14 @@ impl CopyStore {
 
     /// 读副本字节，落库与另存优先用本地副本。
     pub fn read(&self, relative: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.abs(relative)).ok()
+        std::fs::read(self.abs(relative)?).ok()
     }
 
-    /// 删副本：尽力而为，失败（已不存在/被占用）不影响状态。
+    /// 删副本：尽力而为，失败（已不存在/被占用）不影响状态；非法路径不动作。
     pub fn remove(&self, relative: &str) {
-        let _ = std::fs::remove_file(self.abs(relative));
+        if let Some(path) = self.abs(relative) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// 写副本的异步包装：文件读写不占调度线程。
@@ -340,6 +401,9 @@ impl CopyStore {
     /// 清空参考图缩略目录：缓存不落盘，装载时旧副本已无人认领，删掉以免跨进程无限堆积。
     /// 只删本目录一层的文件，结果副本与设置信封不受影响。
     pub fn clear_refs(&self) {
+        if !self.enabled {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir(self.root.join(REF_DIR)) else { return };
         for entry in entries.flatten() {
             let _ = std::fs::remove_file(entry.path());
@@ -486,5 +550,31 @@ mod tests {
         png.extend_from_slice(&0u32.to_be_bytes());
         png.extend_from_slice(&0u32.to_be_bytes());
         assert_eq!(image_size(&png), None, "零尺寸按认不出处理");
+    }
+
+    #[test]
+    fn copy_name_sanitizes_prompt_and_extension() {
+        assert_eq!(copy_name("../../etc/passwd", 0, "x.png"), "______etc_passwd-0.png");
+        assert_eq!(copy_name("p1", 1, "a.png/../../evil"), "p1-1.png");
+        assert_eq!(copy_name("", 2, "a.tar.gz"), "prompt-2.gz");
+    }
+
+    #[test]
+    fn copy_store_rejects_escaping_paths() {
+        let store = CopyStore::new("root".into());
+        assert!(store.abs_path("history/a.png").is_some());
+        assert!(store.abs_path("../a.png").is_none());
+        assert!(store.abs_path("/abs/a.png").is_none());
+        assert!(store.abs_path("history/../../a.png").is_none());
+        assert!(CopyStore::disabled().abs_path("history/a.png").is_none());
+    }
+
+    #[test]
+    fn valid_copy_path_accepts_only_history_files() {
+        assert!(valid_copy_path("history/a.png"));
+        assert!(valid_copy_path("history/sub/a.png"));
+        assert!(!valid_copy_path("refs/a.png"));
+        assert!(!valid_copy_path("history/../a.png"));
+        assert!(!valid_copy_path("/history/a.png"));
     }
 }

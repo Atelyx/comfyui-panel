@@ -10,6 +10,8 @@ use crate::comfy::types::ImageRef;
 
 /// 单次 JSON 请求超时：本机服务，慢于此即视作不可用。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+/// 提交任务：服务端校验/排队可能较慢，给比普通请求更宽的上限。
+const SUBMIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 结果图字节超时：可达数 MB，给足传输时间。
 const BINARY_TIMEOUT: Duration = Duration::from_secs(20);
 /// 节点定义体积较大，给宽松超时。
@@ -49,31 +51,40 @@ impl ComfyClient {
         }
     }
 
-    async fn get_json(&self, path: &str, timeout: Duration) -> Result<Value, String> {
+    async fn get_text(&self, path: &str, timeout: Duration) -> Result<String, String> {
         let res = self
             .http
             .get(self.url(path))
             .timeout(timeout)
             .send()
             .await
-            .map_err(|e| format!("请求失败：{e}"))?;
+            .map_err(|e| if e.is_timeout() { "请求超时".to_string() } else { format!("请求失败：{e}") })?;
         let status = res.status().as_u16();
         let body = res.text().await.map_err(|e| format!("读取响应失败：{e}"))?;
         if status != 200 {
             return Err(extract_error(status, &body));
         }
+        Ok(body)
+    }
+
+    async fn get_json(&self, path: &str, timeout: Duration) -> Result<Value, String> {
+        let body = self.get_text(path, timeout).await?;
         serde_json::from_str(&body).map_err(|e| format!("响应非 JSON：{e}"))
     }
 
     async fn post_json(&self, path: &str, payload: &Value) -> Result<Value, String> {
+        self.post_json_with_timeout(path, payload, REQUEST_TIMEOUT).await
+    }
+
+    async fn post_json_with_timeout(&self, path: &str, payload: &Value, timeout: Duration) -> Result<Value, String> {
         let res = self
             .http
             .post(self.url(path))
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .json(payload)
             .send()
             .await
-            .map_err(|e| format!("请求失败：{e}"))?;
+            .map_err(|e| if e.is_timeout() { "请求超时".to_string() } else { format!("请求失败：{e}") })?;
         let status = res.status().as_u16();
         let body = res.text().await.map_err(|e| format!("读取响应失败：{e}"))?;
         if status != 200 {
@@ -91,7 +102,13 @@ impl ComfyClient {
     }
 
     pub async fn object_info(&self) -> Result<Value, String> {
-        self.get_json("/object_info", OBJECT_INFO_TIMEOUT).await
+        // 节点定义可达数十 MB：解析挪阻塞线程，别停顿插件的单线程调度。
+        let body = self.get_text("/object_info", OBJECT_INFO_TIMEOUT).await?;
+        tokio::task::spawn_blocking(move || {
+            serde_json::from_str::<Value>(&body).map_err(|e| format!("响应非 JSON：{e}"))
+        })
+        .await
+        .map_err(|err| format!("解析节点定义任务失败：{err}"))?
     }
 
     pub async fn queue(&self) -> Result<Value, String> {
@@ -113,7 +130,15 @@ impl ComfyClient {
                 Value::String(origin_id.to_string()),
             )])));
         }
-        self.post_json("/prompt", &Value::Object(body)).await
+        self.post_json_with_timeout("/prompt", &Value::Object(body), SUBMIT_TIMEOUT)
+            .await
+            .map_err(|err| {
+                if err == "请求超时" {
+                    "提交超时：任务可能已入队，请到队列确认后再决定是否重试".to_string()
+                } else {
+                    err
+                }
+            })
     }
 
     /// 定向中断某任务（无参全局中断会波及同服务其他来源，故只支持按 id）。
@@ -190,7 +215,19 @@ impl ComfyClient {
     pub async fn list_user_dir(&self, dir: &str) -> Result<Vec<UserDataEntry>, String> {
         let path = format!("/userdata?dir={}&recurse=true&full_info=true", encode_uri_component(dir));
         let value = self.get_json(&path, REQUEST_TIMEOUT).await?;
-        Ok(value.as_array().cloned().unwrap_or_default().into_iter().filter_map(UserDataEntry::from_value).collect())
+        let items = value
+            .as_array()
+            .ok_or_else(|| "用户目录列表响应不是数组".to_string())?;
+        let entries: Vec<UserDataEntry> = items
+            .iter()
+            .cloned()
+            .filter_map(UserDataEntry::from_value)
+            .collect();
+        // 有内容但一条都解析不出（旧版忽略 full_info、返回字符串数组等）：报错，不静默留空。
+        if entries.is_empty() && !items.is_empty() {
+            return Err(format!("用户目录列表无法解析：{}", truncate_chars(&value.to_string(), 200)));
+        }
+        Ok(entries)
     }
 
     /// 读用户文件原文（工作流 JSON）。路径整体百分号编码（斜杠也编码），与服务端解引用一致。

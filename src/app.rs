@@ -24,7 +24,7 @@ use crate::comfy::types::ImageRef;
 use crate::comfy::ws::{run as ws_run, WsEvent};
 use crate::controller::{self, HostState};
 use crate::gallery;
-use crate::history::{ref_copy_name, ref_path, CopyStore, RefCache, ResultImage, HISTORY_LIMIT};
+use crate::history::{ref_copy_name, ref_path, valid_copy_path, CopyStore, RefCache, ResultImage, HISTORY_LIMIT};
 use crate::runtime::{self, Channel, Runtime};
 use crate::settings::{base_url, ComfySettings, ProcessMode};
 use crate::views::{self, P_BOOL, P_CLEAR, P_COMBO, P_NUM, P_PASTE, P_SEED, P_TEXT, P_UPLOAD};
@@ -73,11 +73,27 @@ pub enum PickerAction {
     Combo { key: String, submit: String },
 }
 
-/// 面内选择浮层的当前内容。
+impl PickerAction {
+    /// 稳定键：同一次点击的目标不随列表下标变化；再散列成短 id 以适配宿主 64 字节上限。
+    fn stable_key(&self) -> String {
+        match self {
+            PickerAction::Workflow(path) => format!("w:{path}"),
+            PickerAction::Size { section, value } => format!("s:{section}:{value}"),
+            PickerAction::PromptAuto => "p:auto".to_string(),
+            PickerAction::PromptField(key) => format!("p:{key}"),
+            PickerAction::RefImage { key, name } => format!("r:{key}:{name}"),
+            PickerAction::Combo { key, submit } => format!("c:{key}:{submit}"),
+        }
+    }
+}
+
+/// 面内选择浮层的当前内容。`ids` 与 `options` 一一对应，是候选的稳定命中 id：
+/// 列表在面板打开期间刷新也不会把点击落到另一个候选上。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picker {
     pub title: String,
     pub options: Vec<PickerOption>,
+    pub ids: Vec<String>,
 }
 
 /// 界面之外的会话态：当前工作流、参数草稿、随机种子勾选、记录流与生成坞的展开态、参考图缩略、
@@ -109,12 +125,21 @@ pub struct Session {
     pub prompt_key: Option<String>,
     /// 参考图缩略副本缓存（私有目录 `refs/`）。
     pub refs: RefCache,
+    /// 提交进行中：防连点重复提交。
+    pub submitting: bool,
+    /// 工作流载入中：防重复载入覆盖草稿。
+    pub loading_workflow: bool,
+    /// 刷新进行中：防连点重复跑整轮探测。
+    pub refreshing: bool,
+    /// 文件对话框打开中：防连点叠开多个对话框。
+    pub dialog_open: bool,
+    /// 正在落库的条目 key：同一条不并发写两次。
+    pub archiving: BTreeSet<String>,
 }
 
 /// 状态真源。
 pub struct Core {
     pub settings: ComfySettings,
-    pub attached: BTreeSet<String>,
     pub runtime: Runtime,
     pub host: HostState,
     pub session: Session,
@@ -133,6 +158,8 @@ pub struct App {
     version: watch::Sender<u64>,
     pub(crate) http: reqwest::Client,
     store: CopyStore,
+    /// 落库串行锁：查重与写入之间不夹别的落库调用，避免同一次双击写两遍。
+    archive_lock: tokio::sync::Mutex<()>,
     /// 当前连接的关停把手：改地址/服务下线时置关停标志并中止读任务——空闲无帧时读循环
     /// 正 await 下一帧，只有中止能让它立刻收场。
     ws_control: Mutex<Option<WsHandle>>,
@@ -162,27 +189,33 @@ impl App {
         };
         let settings = crate::settings::from_value(raw.get("settings"));
         let origin_id = raw.get("originId").and_then(Value::as_str).unwrap_or("").to_string();
-        let history: Vec<ResultImage> = raw
+        let mut history: Vec<ResultImage> = raw
             .get("history")
             .and_then(Value::as_array)
             .map(|items| items.iter().filter_map(|item| serde_json::from_value(item.clone()).ok()).collect())
             .unwrap_or_default();
+        // 信封可能被手改或损坏：副本路径不在私有目录内就丢弃，避免后续淘汰删除越界。
+        for item in &mut history {
+            if item.local.as_deref().is_some_and(|local| !valid_copy_path(local)) {
+                item.local = None;
+                item.copy_attempts = 0;
+            }
+        }
 
-        let private = match ctx.private_dir().await {
-            Ok(dir) => dir,
+        // 私有目录拿不到时不退回相对路径（会写到进程 CWD 且宿主解析不到）：直接禁用副本。
+        let store = match ctx.private_dir().await {
+            Ok(dir) => CopyStore::new(dir),
             Err(err) => {
-                ctx.log_error(&format!("获取插件私有目录失败，退回 data：{err}"));
-                "data".to_string()
+                ctx.log_error(&format!("获取插件私有目录失败，副本与落库导入不可用：{err}"));
+                CopyStore::disabled()
             }
         };
-        let store = CopyStore::new(private);
 
         let mut runtime = Runtime::new();
         runtime.load_persisted(origin_id, history);
 
         let core = Core {
             settings,
-            attached: BTreeSet::new(),
             runtime,
             host: HostState::default(),
             session: Session {
@@ -201,6 +234,7 @@ impl App {
             version: version_tx,
             http: reqwest::Client::new(),
             store,
+            archive_lock: tokio::sync::Mutex::new(()),
             ws_control: Mutex::new(None),
             save_gen: AtomicU64::new(0),
             runtime: OnceLock::new(),
@@ -243,7 +277,7 @@ impl App {
         {
             self.ctx.log_error(&format!("注册设置页失败：{err}"));
         }
-        // Agent 工具：旧宿主没有这个方法时静默降级（工具不出现，面板功能不受影响）
+        // Agent 工具：注册失败只记日志，工具不出现，面板功能不受影响
         crate::agent::register(&self.ctx).await;
 
         // 首轮刷新放到后台执行：超时只停止等待，不取消刷新本身，避免取到一半的新结果被丢弃。
@@ -497,7 +531,7 @@ impl App {
                             Self::log_failure_once(
                                 &app.ctx,
                                 &app.ws_down_logged,
-                                "ComfyUI WebSocket 已停止重连",
+                                "ComfyUI WebSocket 退避用尽，稍后重连",
                             );
                             break;
                         }
@@ -575,7 +609,7 @@ impl App {
 
     /// 改地址/服务下线：置关停标志并中止读任务，监督循环随即用新设置重连。
     fn restart_ws(&self) {
-        if let Some(handle) = self.ws_control.lock().unwrap().as_ref() {
+        if let Some(handle) = self.ws_control.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
             handle.shutdown.store(true, Ordering::Relaxed);
             handle.task.abort();
         }
@@ -614,6 +648,10 @@ impl App {
                     return;
                 }
             };
+            // 序列化期间可能又有变更：代数已变就让最新那次写，避免旧快照后落盘覆盖新快照。
+            if app.save_gen.load(Ordering::SeqCst) != gen {
+                return;
+            }
             match app.ctx.state_write(envelope).await {
                 Ok(()) => app.save_failed_logged.store(false, Ordering::Relaxed),
                 Err(err) => Self::log_failure_once(
@@ -640,13 +678,36 @@ impl App {
             let mut core = self.core();
             match id {
                 views::SET_HOST => {
-                    let text = text.trim().to_string();
-                    core.settings.host = if text.is_empty() { ComfySettings::default().host } else { text };
+                    if text.trim().is_empty() {
+                        core.settings.host = ComfySettings::default().host;
+                    } else {
+                        match crate::settings::normalize_host(text) {
+                            Ok(host) => core.settings.host = host,
+                            Err(err) => {
+                                drop(core);
+                                self.set_error(format!("地址无效：{err}"));
+                                return;
+                            }
+                        }
+                    }
                 }
                 views::SET_PORT => {
-                    if let Ok(port) = text.trim().parse::<u32>() {
-                        if let Ok(port) = u16::try_from(port.clamp(1, 65535)) {
-                            core.settings.port = port;
+                    if text.trim().is_empty() {
+                        core.settings.port = ComfySettings::default().port;
+                    } else {
+                        let port = text
+                            .trim()
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|port| (1..=65535).contains(port))
+                            .and_then(|port| u16::try_from(port).ok());
+                        match port {
+                            Some(port) => core.settings.port = port,
+                            None => {
+                                drop(core);
+                                self.set_error("端口需为 1–65535 的整数".to_string());
+                                return;
+                            }
                         }
                     }
                 }
@@ -666,26 +727,46 @@ impl App {
         self.schedule_save();
     }
 
-    /// 进程接管方式切换；重复点当前值不落盘。
+    /// 进程接管方式切换；重复点当前值不落盘。切到外部管理时先停掉本插件托管的进程，
+    /// 否则停止入口会随 managed 一起消失，用户再也停不了它。
     pub(crate) fn set_process_mode(self: &Arc<App>, mode: ProcessMode) {
-        let changed = {
+        let (changed, had_process) = {
             let mut core = self.core();
             if core.settings.process_mode == mode {
-                false
+                (false, false)
             } else {
                 core.settings.process_mode = mode;
-                true
+                (true, core.host.pid.is_some() || core.host.starting)
             }
         };
-        if changed {
-            self.invalidate();
-            self.schedule_save();
+        if !changed {
+            return;
         }
+        if mode == ProcessMode::External && had_process {
+            let app = self.clone();
+            self.spawn_task(async move {
+                if let Err(err) = controller::stop(&app).await {
+                    app.set_error(format!("停止托管进程失败：{err}"));
+                }
+            });
+            self.set_notice("已切换为外部管理，正在停止托管进程".to_string());
+        }
+        self.invalidate();
+        self.schedule_save();
     }
 
     /// 选择 ComfyUI 安装目录：对话框等待不持 Core 锁。
     pub(crate) async fn pick_comfy_dir(self: &Arc<App>) {
-        match self.ctx.pick_directory(Some("选择 ComfyUI 安装目录")).await {
+        {
+            let mut core = self.core();
+            if core.session.dialog_open {
+                return;
+            }
+            core.session.dialog_open = true;
+        }
+        let picked = self.ctx.pick_directory(Some("选择 ComfyUI 安装目录")).await;
+        self.core().session.dialog_open = false;
+        match picked {
             Ok(Some(dir)) => {
                 self.core().settings.comfy_dir = dir;
                 self.invalidate();
@@ -717,16 +798,28 @@ impl App {
         self.invalidate();
     }
 
-    /// 刷新状态与工作流清单。
+    /// 刷新状态与工作流清单；连点只跑一轮。
     pub(crate) async fn refresh_status(self: &Arc<App>) {
+        {
+            let mut core = self.core();
+            if core.session.refreshing {
+                return;
+            }
+            core.session.refreshing = true;
+        }
         self.run_poll_cycle().await;
         self.refresh_workflows_cycle().await;
+        self.core().session.refreshing = false;
         self.invalidate();
     }
 
-    /// 记录流多展开一批历史。
+    /// 记录流多展开一批历史；取消贴底，否则新增的旧记录会被 follow 到新终点、用户看不到。
     pub(crate) fn show_earlier(self: &Arc<App>) {
-        self.core().session.shown_batches += FLOW_BATCH_STEP;
+        {
+            let mut core = self.core();
+            core.session.shown_batches += FLOW_BATCH_STEP;
+            core.session.flow_at_bottom = false;
+        }
         self.invalidate();
     }
 
@@ -773,7 +866,19 @@ impl App {
 
     pub(crate) fn stop_service(self: &Arc<App>) {
         let app = self.clone();
-        self.spawn_task(async move { controller::stop(&app).await });
+        self.spawn_task(async move {
+            if let Err(err) = controller::stop(&app).await {
+                app.set_error(format!("停止服务失败：{err}"));
+            }
+        });
+    }
+
+    /// 一键更新：停托管服务 → git pull --ff-only → 按需重启，全程在后台任务里跑。
+    pub(crate) fn start_update(self: &Arc<App>) {
+        let app = self.clone();
+        self.spawn_task(async move {
+            controller::update(&app).await;
+        });
     }
 
     // ---------- 选择浮层 ----------
@@ -783,7 +888,11 @@ impl App {
             self.set_notice(format!("{title}：没有可选项"));
             return;
         }
-        self.core().session.picker = Some(Picker { title: title.to_string(), options });
+        let ids = options
+            .iter()
+            .map(|option| gallery::digest(&option.action.stable_key()))
+            .collect();
+        self.core().session.picker = Some(Picker { title: title.to_string(), options, ids });
         self.invalidate();
     }
 
@@ -791,14 +900,30 @@ impl App {
         let options = {
             let core = self.core();
             let current = core.session.workflow_id.as_deref();
+            let names: Vec<String> = core
+                .runtime
+                .snap
+                .workflows
+                .iter()
+                .map(|file| files::workflow_display_name(&file.name))
+                .collect();
             core.runtime
                 .snap
                 .workflows
                 .iter()
-                .map(|file| PickerOption {
-                    label: files::workflow_display_name(&file.name),
-                    current: current == Some(file.path.as_str()),
-                    action: PickerAction::Workflow(file.path.clone()),
+                .map(|file| {
+                    let display = files::workflow_display_name(&file.name);
+                    // 同名文件散在不同子目录时补上相对路径，避免选择器里无法区分。
+                    let label = if names.iter().filter(|name| **name == display).count() > 1 {
+                        format!("{display}（{}）", file.path)
+                    } else {
+                        display
+                    };
+                    PickerOption {
+                        label,
+                        current: current == Some(file.path.as_str()),
+                        action: PickerAction::Workflow(file.path.clone()),
+                    }
                 })
                 .collect()
         };
@@ -950,6 +1075,11 @@ impl App {
     pub(crate) fn toggle_seed(self: &Arc<App>, key: &str, on: bool) {
         {
             let mut core = self.core();
+            // 连线种子没有「每次随机」语义：即使收到迟到的点击也不改勾选集合。
+            let fields = runtime::build_fields_for(&core.session.draft, &core.runtime.snap);
+            if fields.iter().find(|field| field.key() == key).is_some_and(|field| field.connected) {
+                return;
+            }
             if on {
                 core.session.seed_mode.insert(key.to_string());
             } else {
@@ -1067,11 +1197,21 @@ impl App {
 
     /// 载入下拉选中项：读文件并归一化成可提交 prompt，草稿与随机字段重置。
     pub(crate) async fn select_workflow(self: &Arc<App>, index: i64) {
+        {
+            let mut core = self.core();
+            if core.session.loading_workflow {
+                return;
+            }
+            core.session.loading_workflow = true;
+        }
         let file = {
             let core = self.core();
             core.runtime.snap.workflows.get(index.max(0) as usize).cloned()
         };
-        let Some(file) = file else { return };
+        let Some(file) = file else {
+            self.core().session.loading_workflow = false;
+            return;
+        };
         let (settings, http) = self.io_ctx();
         match runtime::load_workflow(&settings, &http, &file).await {
             Ok(stored) => {
@@ -1094,6 +1234,7 @@ impl App {
             }
             Err(err) => self.set_error(err),
         }
+        self.core().session.loading_workflow = false;
     }
 
     /// 按路径选中并载入工作流（AI 工具用：名称匹配在锁外做，路径比下拉下标稳定）。
@@ -1109,16 +1250,28 @@ impl App {
     }
 
     /// 把当前草稿写回所属工作流文件；保存后刷新其 mtime 以免误报外部改动。
+    /// 载入后文件被外部改过（或界面已提示过）时中止，不覆盖用户的改动。
     pub(crate) async fn save_current_workflow(self: &Arc<App>) {
-        let (settings, http, file, draft) = {
+        let (settings, http, file, draft, expected_modified) = {
             let core = self.core();
             let Some(id) = core.session.workflow_id.as_ref() else {
                 drop(core);
                 self.set_error("未载入工作流，无法保存参数".to_string());
                 return;
             };
+            if core.session.current_changed {
+                drop(core);
+                self.set_error("文件已被外部修改，请重新选择后再保存".to_string());
+                return;
+            }
             match core.runtime.snap.workflows.iter().find(|f| f.path == *id).cloned() {
-                Some(file) => (core.settings.clone(), self.http.clone(), file, core.session.draft.clone()),
+                Some(file) => (
+                    core.settings.clone(),
+                    self.http.clone(),
+                    file.clone(),
+                    core.session.draft.clone(),
+                    file.modified,
+                ),
                 None => {
                     drop(core);
                     self.set_error("工作流已不存在，请重新选择".to_string());
@@ -1126,15 +1279,16 @@ impl App {
                 }
             }
         };
-        match runtime::save_workflow(&settings, &http, &file, &draft).await {
-            Ok(()) => {
+        match runtime::save_workflow(&settings, &http, &file, &draft, expected_modified).await {
+            Ok(outcome) => {
                 self.refresh_workflows_cycle().await;
                 let mut core = self.core();
                 if let Some(current) = core.runtime.snap.workflows.iter().find(|f| f.path == file.path) {
                     core.session.workflow_modified = Some(current.modified);
                 }
                 core.session.current_changed = false;
-                core.session.notice = format!("已保存到 {}", file.name);
+                let suffix = if outcome.replaced_wholesale { "（API 格式整体替换）" } else { "" };
+                core.session.notice = format!("已保存到 {}{suffix}", file.name);
                 drop(core);
                 self.invalidate();
             }
@@ -1143,18 +1297,34 @@ impl App {
     }
 
     pub(crate) async fn run_generation(self: &Arc<App>) {
-        let (settings, http, client_id, origin_id, prompt, title) = {
-            let core = self.core();
-            if core.session.draft.as_object().map(|map| map.is_empty()).unwrap_or(true) {
-                drop(core);
-                self.set_error("请先选择工作流".to_string());
+        let prepared = {
+            let mut core = self.core();
+            if core.session.submitting {
                 return;
             }
-            let prompt = form::apply_seed_mode(&core.session.draft, &core.session.seed_mode);
-            let title = core.session.workflow_name.clone().unwrap_or_else(|| "手动工作流".to_string());
-            (core.settings.clone(), self.http.clone(), core.runtime.book.client_id.clone(), core.runtime.book.origin_id.clone(), prompt, title)
+            if core.session.draft.as_object().map(|map| map.is_empty()).unwrap_or(true) {
+                None
+            } else {
+                core.session.submitting = true;
+                let prompt = form::apply_seed_mode(&core.session.draft, &core.session.seed_mode);
+                let title = core.session.workflow_name.clone().unwrap_or_else(|| "手动工作流".to_string());
+                Some((
+                    core.settings.clone(),
+                    self.http.clone(),
+                    core.runtime.book.client_id.clone(),
+                    core.runtime.book.origin_id.clone(),
+                    prompt,
+                    title,
+                ))
+            }
         };
-        match runtime::fetch_submit(&settings, &http, &client_id, &origin_id, &prompt).await {
+        let Some((settings, http, client_id, origin_id, prompt, title)) = prepared else {
+            self.set_error("请先选择工作流".to_string());
+            return;
+        };
+        let result = runtime::fetch_submit(&settings, &http, &client_id, &origin_id, &prompt).await;
+        self.core().session.submitting = false;
+        match result {
             Ok(prompt_id) => {
                 self.core().runtime.apply_submit(&prompt_id, &title);
                 self.invalidate();
@@ -1248,41 +1418,47 @@ impl App {
     }
 
     /// 落库：本地副本就绪时经私有目录按路径导入（无载荷上限），缺副本才回源取字节走二进制写面。
+    /// 同一条不并发写两次；查重与写入在落库锁内串行，双击不会写出一对同路径文件。
     pub(crate) async fn archive_result(self: &Arc<App>, key: String) {
+        {
+            let mut core = self.core();
+            if !core.session.archiving.insert(key.clone()) {
+                return;
+            }
+        }
+        let _guard = self.archive_lock.lock().await;
+        let result = self.archive_result_inner(&key).await;
+        self.core().session.archiving.remove(&key);
+        if let Err(err) = result {
+            self.set_error(err);
+        }
+    }
+
+    async fn archive_result_inner(self: &Arc<App>, key: &str) -> Result<(), String> {
         let (settings, http, item, folder, local) = {
             let core = self.core();
-            match core.runtime.snap.results.iter().find(|r| r.key == key).cloned() {
-                Some(item) => {
-                    let local = item.local.clone();
-                    (core.settings.clone(), self.http.clone(), item, core.settings.archive_folder.clone(), local)
-                }
-                None => return,
+            let Some(item) = core.runtime.snap.results.iter().find(|r| r.key == key).cloned() else {
+                return Ok(());
+            };
+            if item.saved_path.is_some() {
+                return Ok(());
             }
+            let local = item.local.clone();
+            (core.settings.clone(), self.http.clone(), item, core.settings.archive_folder.clone(), local)
         };
-        let saved = match local.as_deref() {
-            Some(local) => {
-                crate::archive::save_from_private(&self.ctx, &folder, &item.image_ref, &self.store.abs_path(local)).await
-            }
+        let local_path = local.as_deref().and_then(|local| self.store.abs_path(local));
+        let saved = match local_path {
+            Some(path) => crate::archive::save_from_private(&self.ctx, &folder, &item.image_ref, &path).await?,
             None => {
-                let bytes = match read_result_bytes(&self.store, &settings, &http, &item).await {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        self.set_error(err);
-                        return;
-                    }
-                };
-                crate::archive::save(&self.ctx, &folder, &item.image_ref, &bytes).await
+                let bytes = read_result_bytes(&self.store, &settings, &http, &item).await?;
+                crate::archive::save(&self.ctx, &folder, &item.image_ref, &bytes).await?
             }
         };
-        match saved {
-            Ok(relative) => {
-                self.core().runtime.mark_saved(&key, relative.clone());
-                self.invalidate();
-                self.schedule_save();
-                self.set_notice(format!("已保存到仓库：{relative}"));
-            }
-            Err(err) => self.set_error(err),
-        }
+        self.core().runtime.mark_saved(key, saved.clone());
+        self.invalidate();
+        self.schedule_save();
+        self.set_notice(format!("已保存到仓库：{saved}"));
+        Ok(())
     }
 
     /// 另存为：取字节（本地副本优先，缺则回源）→ 保存对话框定路径 → 写盘。产物在仓库外，不记入状态。
@@ -1308,7 +1484,16 @@ impl App {
             default_path: Some(crate::archive::save_as_name(&item.image_ref.filename)),
             filters: Vec::new(),
         };
-        let path = match self.ctx.pick_file(params).await {
+        {
+            let mut core = self.core();
+            if core.session.dialog_open {
+                return;
+            }
+            core.session.dialog_open = true;
+        }
+        let picked = self.ctx.pick_file(params).await;
+        self.core().session.dialog_open = false;
+        let path = match picked {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(err) => {
@@ -1317,9 +1502,9 @@ impl App {
             }
         };
         let target = path.clone();
-        match tokio::task::spawn_blocking(move || std::fs::write(&target, &bytes)).await {
+        match tokio::task::spawn_blocking(move || crate::archive::write_user_file(&target, &bytes)).await {
             Ok(Ok(())) => self.set_notice(format!("已另存到 {path}")),
-            Ok(Err(err)) => self.set_error(format!("写入文件失败：{err}")),
+            Ok(Err(err)) => self.set_error(err),
             Err(err) => self.set_error(format!("写入文件任务失败：{err}")),
         }
     }
@@ -1328,7 +1513,14 @@ impl App {
     pub(crate) async fn open_lightbox(self: &Arc<App>, key: String) {
         let ready = {
             let core = self.core();
-            core.runtime.snap.results.iter().any(|r| r.key == key && r.local.is_some())
+            core.runtime
+                .snap
+                .results
+                .iter()
+                .find(|r| r.key == key)
+                .and_then(|r| r.local.as_deref())
+                .and_then(|local| self.store.abs_path(local))
+                .is_some_and(|path| path.exists())
         };
         if !ready {
             self.set_error("副本未就绪，无法预览".to_string());
@@ -1349,7 +1541,16 @@ impl App {
             default_path: None,
             filters: vec![FileFilter { name: "图片".to_string(), extensions: vec!["png".into(), "jpg".into(), "jpeg".into(), "webp".into(), "bmp".into()] }],
         };
-        let path = match self.ctx.pick_file(params).await {
+        {
+            let mut core = self.core();
+            if core.session.dialog_open {
+                return;
+            }
+            core.session.dialog_open = true;
+        }
+        let picked = self.ctx.pick_file(params).await;
+        self.core().session.dialog_open = false;
+        let path = match picked {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(err) => {
@@ -1358,10 +1559,10 @@ impl App {
             }
         };
         let source = path.clone();
-        let bytes = match tokio::task::spawn_blocking(move || std::fs::read(&source)).await {
+        let bytes = match tokio::task::spawn_blocking(move || crate::archive::read_user_file(&source)).await {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(err)) => {
-                self.set_error(format!("读取图片失败：{err}"));
+                self.set_error(err);
                 return;
             }
             Err(err) => {
@@ -1425,7 +1626,6 @@ impl App {
         }
         {
             let mut core = self.core();
-            core.attached.insert(params.surface_id.clone());
             if params.surface_id == SURFACE_PANEL {
                 // 挂上来就当用户在看最新一屏：首帧贴底，之后新结果才继续拉底。
                 core.session.flow_at_bottom = true;
@@ -1434,13 +1634,12 @@ impl App {
         self.invalidate();
     }
 
-    pub fn on_surface_detached(self: &Arc<App>, params: SurfaceDetachedParams) {
-        self.core().attached.remove(&params.surface_id);
-    }
+    pub fn on_surface_detached(self: &Arc<App>, _params: SurfaceDetachedParams) {}
 
     // ---------- 错误/提示落状态 ----------
 
     fn set_error(self: &Arc<App>, message: String) {
+        self.ctx.log_error(&format!("界面错误：{message}"));
         self.core().runtime.snap.error = message;
         self.invalidate();
     }
@@ -1532,6 +1731,19 @@ pub(crate) fn text_number(text: &str) -> Value {
 /// 草稿里某个字段的展示串（输入框编辑基线，事件到达时按当前事实重取）。
 pub(crate) fn field_text(core: &Core, key: &str) -> Option<String> {
     field_raw(core, key).map(|value| form::display_value(Some(&value)))
+}
+
+/// 数值框的编辑基线：与视图的 `numeric_value(...).to_string()` 同口径，
+/// 避免整数值浮点显示成 `7.0` 而输入框画的是 `7`，光标按不同长度计算。
+pub(crate) fn number_text(core: &Core, key: &str) -> Option<String> {
+    let value = field_raw(core, key)?;
+    Some(match value {
+        Value::Number(number) => number
+            .as_f64()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| number.to_string()),
+        other => form::display_value(Some(&other)),
+    })
 }
 
 /// 草稿里某个字段的原始值：键为 `${节点id}.${输入名}`。
@@ -1632,7 +1844,6 @@ mod tests {
     fn field_raw_reads_draft_by_node_and_input() {
         let mut core = Core {
             settings: ComfySettings::default(),
-            attached: BTreeSet::new(),
             runtime: Runtime::new(),
             host: HostState::default(),
             session: Session { draft: json!({"3": {"inputs": {"seed": 42, "text": "hi"}}}), ..Default::default() },

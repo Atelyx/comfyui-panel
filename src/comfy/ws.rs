@@ -36,7 +36,7 @@ pub enum WsEvent {
     ExecutionEnd,
     /// 队列相关：status / execution_start / execution_cached，运行时据此刷新队列。
     QueueSignal,
-    /// 断线且不再重连（退避用尽）：运行时据此确认服务是否还在。
+    /// 退避用尽：外层短暂停顿后会重新建立连接，运行时据此记一条状态日志。
     Disconnected,
 }
 
@@ -122,17 +122,25 @@ fn dispatch_text(raw: &str, tx: &UnboundedSender<WsEvent>) {
 /// 进度条的是步数最多的采样节点，与经典 `progress` 事件的口径一致。
 fn progress_from_state(data: &Value) -> Option<WsEvent> {
     let prompt_id = data.get("prompt_id").and_then(Value::as_str).map(str::to_string);
-    let best = data
-        .get("nodes")?
-        .as_object()?
-        .values()
-        .filter_map(|node| {
-            let value = node.get("value").and_then(Value::as_f64)?;
-            let max = node.get("max").and_then(Value::as_f64)?;
-            Some(ProgressPayload { value, max, prompt_id: prompt_id.clone() })
-        })
-        .max_by(|a, b| a.max.total_cmp(&b.max))?;
-    Some(WsEvent::Progress(best))
+    let mut nodes: Vec<(ProgressPayload, bool)> = Vec::new();
+    for node in data.get("nodes")?.as_object()?.values() {
+        let (Some(value), Some(max)) = (
+            node.get("value").and_then(Value::as_f64),
+            node.get("max").and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        let running = node.get("state").and_then(Value::as_str) == Some("running");
+        nodes.push((ProgressPayload { value, max, prompt_id: prompt_id.clone() }, running));
+    }
+    // 上游的 progress_state 保留已完成节点：优先取运行中的节点，避免进度条停在已完成的采样器上。
+    let best = nodes
+        .iter()
+        .filter(|(_, running)| *running)
+        .map(|(payload, _)| payload)
+        .max_by(|a, b| a.max.total_cmp(&b.max))
+        .or_else(|| nodes.iter().map(|(payload, _)| payload).max_by(|a, b| a.max.total_cmp(&b.max)))?;
+    Some(WsEvent::Progress(best.clone()))
 }
 
 fn forward(type_: &str, data: &Value, tx: &UnboundedSender<WsEvent>) {
@@ -176,8 +184,8 @@ mod tests {
         let data = json!({
             "prompt_id": "p1",
             "nodes": {
-                "3": {"value": 1.0, "max": 4.0},
-                "7": {"value": 20.0, "max": 30.0},
+                "3": {"value": 1.0, "max": 4.0, "state": "running"},
+                "7": {"value": 20.0, "max": 30.0, "state": "running"},
             },
         });
         let event = send("progress_state", data);
@@ -186,5 +194,20 @@ mod tests {
         };
         assert_eq!((progress.value, progress.max), (20.0, 30.0));
         assert_eq!(progress.prompt_id.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn progress_state_prefers_running_over_finished() {
+        let data = json!({
+            "prompt_id": "p1",
+            "nodes": {
+                "3": {"value": 30.0, "max": 30.0, "state": "finished"},
+                "7": {"value": 5.0, "max": 20.0, "state": "running"},
+            },
+        });
+        let Some(WsEvent::Progress(progress)) = send("progress_state", data) else {
+            panic!("应解析成进度事件");
+        };
+        assert_eq!((progress.value, progress.max), (5.0, 20.0), "不能停在已完成的采样器上");
     }
 }

@@ -19,12 +19,17 @@ pub struct StoredWorkflow {
 /// 读文件并归一化出可提交 prompt。JSON 解析失败带「文件不是合法 JSON」前缀，读文件失败裸传原因。
 pub async fn load_workflow(client: &ComfyClient, file: &WorkflowFileInfo) -> Result<StoredWorkflow, String> {
     let text = client.read_user_file(&file.path).await?;
-    let raw: Value = serde_json::from_str(&text).map_err(|e| format!("文件不是合法 JSON：{e}"))?;
-    let prompt = if is_api_format(&raw) {
-        validate_api_prompt(&raw)?
-    } else {
-        convert_ui_to_api(&raw)?
-    };
+    // 工作流 JSON 可能很大：解析与转换挪阻塞线程。
+    let prompt = tokio::task::spawn_blocking(move || {
+        let raw: Value = serde_json::from_str(&text).map_err(|e| format!("文件不是合法 JSON：{e}"))?;
+        if is_api_format(&raw) {
+            validate_api_prompt(&raw)
+        } else {
+            convert_ui_to_api(&raw)
+        }
+    })
+    .await
+    .map_err(|err| format!("解析工作流任务失败：{err}"))??;
     Ok(StoredWorkflow {
         id: file.path.clone(),
         name: files::workflow_display_name(&file.name),
@@ -33,23 +38,45 @@ pub async fn load_workflow(client: &ComfyClient, file: &WorkflowFileInfo) -> Res
     })
 }
 
+/// 写回结果：UI 格式只覆盖 widget 值，API 格式整份替换。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveOutcome {
+    pub replaced_wholesale: bool,
+}
+
 /// 把参数草稿写回文件：API 格式整体替换为草稿，UI 格式只覆盖 widget 值（保留结构与连线）。统一 2 空格缩进。
-pub async fn save_workflow_params(client: &ComfyClient, file: &WorkflowFileInfo, prompt: &Value) -> Result<(), String> {
+/// 写回前按 `/userdata` 的 mtime 确认文件没被外部改过；不一致即中止，不覆盖用户的改动。
+pub async fn save_workflow_params(
+    client: &ComfyClient,
+    file: &WorkflowFileInfo,
+    prompt: &Value,
+    expected_modified: f64,
+) -> Result<SaveOutcome, String> {
+    let current = files::list_workflow_files(client).await?;
+    let Some(entry) = current.iter().find(|item| item.path == file.path) else {
+        return Err("工作流已不在列表中，请重新选择后再保存".to_string());
+    };
+    if entry.modified != expected_modified {
+        return Err("文件已被外部修改，请重新选择后再保存".to_string());
+    }
     let text = client.read_user_file(&file.path).await?;
-    let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("文件不是合法 JSON：{e}"))?;
     let draft = prompt.clone();
-    let content = tokio::task::spawn_blocking(move || -> Result<String, String> {
+    let (content, replaced_wholesale) = tokio::task::spawn_blocking(move || -> Result<(String, bool), String> {
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("文件不是合法 JSON：{e}"))?;
         if is_api_format(&parsed) {
-            serde_json::to_string_pretty(&draft).map_err(|e| e.to_string())
+            let content = serde_json::to_string_pretty(&draft).map_err(|e| e.to_string())?;
+            Ok((content, true))
         } else {
             let mut tree = parsed;
             apply_draft_to_ui(&mut tree, &draft)?;
-            serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())
+            let content = serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?;
+            Ok((content, false))
         }
     })
     .await
     .map_err(|err| format!("序列化工作流任务失败：{err}"))??;
-    client.write_user_file(&file.path, &content).await
+    client.write_user_file(&file.path, &content).await?;
+    Ok(SaveOutcome { replaced_wholesale })
 }
 
 /// 校验并归一化 API 格式：只保留 `class_type`/`inputs`/`_meta` 三键，丢弃其余节点键；不检查节点类型是否存在

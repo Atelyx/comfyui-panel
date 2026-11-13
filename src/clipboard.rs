@@ -14,14 +14,18 @@ pub async fn read_png_bytes(ctx: &Context) -> Result<Vec<u8>, String> {
         return Err("图片内容为空".to_string());
     }
     let encoded = image.base64;
-    match tokio::task::spawn_blocking(move || {
+    let bytes = match tokio::task::spawn_blocking(move || {
         base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes())
     })
     .await
     {
-        Ok(result) => result.map_err(|e| format!("图片数据解码失败：{e}")),
-        Err(err) => Err(format!("图片解码任务失败：{err}")),
+        Ok(result) => result.map_err(|e| format!("图片数据解码失败：{e}"))?,
+        Err(err) => return Err(format!("图片解码任务失败：{err}")),
+    };
+    if !is_png(&bytes) {
+        return Err("剪贴板图片不是 PNG 格式".to_string());
     }
+    Ok(bytes)
 }
 
 /// 粘贴件的上传文件名：`clipboard-{毫秒}.png`，与用户自选文件区分。

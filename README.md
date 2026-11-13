@@ -1,13 +1,13 @@
 # ComfyUI
 
-Atelyx 原生插件（Rust 编译为 cdylib 动态库，由宿主同进程按 C ABI 加载）：在 Atelyx 里选工作流、调参数、排队生成、看实时进度，并把结果存进当前仓库。需要节点级编排时，一键在系统浏览器打开 ComfyUI 原生界面。
+Atelyx 原生插件（Rust 编译为 cdylib 动态库，由宿主同进程按 C ABI 加载）：在 Atelyx 里选工作流、调参数、排队生成、看实时进度，并把结果存进当前仓库；同时托管 ComfyUI 进程的启停与更新。需要节点级编排时，一键在系统浏览器打开 ComfyUI 原生界面。
 
-> 要求宿主支持同进程插件的 Atelyx（清单 `api_version = 1`；界面由宿主在重绘拍里同步调插件绘制，控件层随插件 SDK 提供）。
+> 要求 Atelyx 0.6.6 及以上（清单 `api_version = 1`；同进程插件、TOML 清单与同步绘制在 0.6.6 提供）。
 
 ## 界面
 
 - **ComfyUI 生成**面板：上中下三段——顶部状态条（连接、队列、显存与启停控制），中间结果记录流（按批次成卡、新图自动贴底、悬停图格可直接保存、点图开灯箱预览），底部生成坞（整宽：工作流选择、主提示词、比例/分辨率/张数与步数/CFG 自适应网格、参考图缩略、生成钮；「高级参数」展开为行内面板，全部参数按节点分组）。
-- **ComfyUI 设置**页：地址端口、进程托管、保存目录。
+- **ComfyUI 设置**页：地址端口、进程托管、一键更新、保存目录。
 
 两者在「添加面板」里分别添加。
 
@@ -21,6 +21,7 @@ Atelyx 原生插件（Rust 编译为 cdylib 动态库，由宿主同进程按 C 
 4. 「保存参数」把面板里的参数写回工作流文件；UI 格式只改 widget 值，结构与连线不动。
 5. 工作流被外部改动时给出提示，重新选择即载入最新内容。
 6. 在宿主 AI 设置里勾选 `comfy_generate` 后，对话中可以让 Agent 直接提交生成：默认用面板当前工作流，也可指定工作流名或让 AI 覆写主提示词，结果照常进记录流。
+7. 设置页「维护 → 一键更新」在安装目录执行 `git pull --ff-only`，随后用安装目录的 Python 执行 `pip install -r requirements.txt`：托管服务会先停止，更新完成后若原先在运行会自动重启；只支持 git 克隆的安装目录。
 
 LoadImage 类节点的 `image` 输入横排成参考图卡，带**上传**、**粘贴**、**清除**三个动作与一份缩略候选清单：上传选本地图片，粘贴取剪贴板里的图片，两者都经 ComfyUI 的 `/upload/image`；缩略图只缓存在插件私有目录，面板装载时清空、不跨会话保留。
 
@@ -34,16 +35,17 @@ LoadImage 类节点的 `image` 输入横排成参考图卡，带**上传**、**�
 
 两种托管方式：**托管启动**由插件启停，命令为 `python main.py --listen <地址> --port <端口>` 再追加自定义参数，等待就绪期间可随时「取消启动」，停止时结束整棵进程树；**外部管理**自行启动，插件只检测连接。安装目录已填、Python 路径留空时，自动取该目录 venv 里的解释器（Windows `venv/Scripts/python.exe`、类 Unix `venv/bin/python`）。插件停用、卸载或应用退出时，Atelyx 会收尾它启动的进程。
 
+**一键更新**在设置页「维护」里，对安装目录执行 `git pull --ff-only`（禁掉终端凭据提示），再用安装目录的 Python 执行 `pip install -r requirements.txt`：托管服务先停，更新完成后若原先在运行会自动重启。不是 git 仓库、或有冲突的本地改动时更新失败并显示 git 输出，不强制覆盖；依赖安装用 pip，uv 等无 pip 的环境需手动执行 `uv pip install -r requirements.txt`；外部管理模式下不会自动重启服务。
+
 ## 权限
 
 | 声明 | 用途 |
 | --- | --- |
-| `process` | 启停 ComfyUI 进程树；调系统命令打开浏览器 |
+| `process` | 启停 ComfyUI 进程树、运行 git 更新；调系统命令打开浏览器 |
 | `state` | 保存设置与生成历史 |
-| `notification` | 状态提示 |
+| `notification` | 进程失败与退出提醒 |
 | `dialog` | 选择安装目录、参考图与结果另存位置 |
-| `fs` | 读写插件私有目录里的结果副本、参考图与另存位置 |
-| `vault` | 把结果图写进当前仓库（本地仓库与协作空间） |
+| `files` | 读写插件私有目录里的结果副本、参考图，以及当前仓库（本地与协作空间） |
 | `clipboard` | 读取剪贴板图片用于参考图粘贴，复制结果图到剪贴板 |
 | `ai` | 把生成能力注册成 Agent 工具（在宿主 AI 设置勾选后生效） |
 
@@ -52,6 +54,7 @@ LoadImage 类节点的 `image` 输入横排成参考图卡，带**上传**、**�
 ```sh
 cargo build --release   # 产物 target/release/comfyui_panel.dll（Linux 为 libcomfyui_panel.so）
 cargo test              # 纯逻辑单元测试
+cargo clippy --all-targets
 ```
 
 依赖同级 `../../Atelyx` 的 `atelyx-plugin-sdk` / `atelyx-plugin-protocol`。把动态库产物与 `atelyx_manifest.toml` 一并放进插件目录即可装载。
