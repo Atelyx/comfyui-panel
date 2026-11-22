@@ -53,6 +53,12 @@ const FLOW_BATCH_INIT: usize = 8;
 const FLOW_BATCH_STEP: usize = 8;
 /// 启用时首轮刷新的等待上限：正常本地服务毫秒级完成，慢服务则交给常驻轮询补齐。
 const FIRST_REFRESH_BUDGET: Duration = Duration::from_secs(5);
+/// 选择浮层各触发控件的高度：指针落点减半高即控件上沿，菜单贴着它展开。
+const ANCHOR_H_WORKFLOW: f32 = 36.0;
+const ANCHOR_H_SIZE: f32 = 54.0;
+const ANCHOR_H_PROMPT: f32 = 32.0;
+const ANCHOR_H_REF: f32 = 76.0;
+const ANCHOR_H_COMBO: f32 = 34.0;
 
 /// 选择浮层的一个候选：标签、是否当前值、选中后执行的动作。
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +93,14 @@ impl PickerAction {
     }
 }
 
+/// 选择器打开时指针落在控件上的位置与控件高：浮层据此贴到触发控件。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickerAnchor {
+    pub x: f32,
+    pub y: f32,
+    pub h: f32,
+}
+
 /// 面内选择浮层的当前内容。`ids` 与 `options` 一一对应，是候选的稳定命中 id：
 /// 列表在面板打开期间刷新也不会把点击落到另一个候选上。
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +108,7 @@ pub struct Picker {
     pub title: String,
     pub options: Vec<PickerOption>,
     pub ids: Vec<String>,
+    pub anchor: Option<PickerAnchor>,
 }
 
 /// 界面之外的会话态：当前工作流、参数草稿、随机种子勾选、记录流与生成坞的展开态、参考图缩略、
@@ -109,8 +124,10 @@ pub struct Session {
     pub notice: String,
     /// 记录流灯箱当前展示的结果 key（面内行内面板）。
     pub lightbox_key: Option<String>,
-    /// 面内选择面板：工作流、尺寸三段、提示词来源、参考图与字段下拉共用。
+    /// 面内选择浮层：工作流、尺寸三段、提示词来源、参考图与字段下拉共用。
     pub picker: Option<Picker>,
+    /// 最近一次指针抬起的面内坐标：选择浮层以触发控件为基准定位。
+    pub pointer: Option<(f32, f32)>,
     /// 上一次提交的记录流布局：命中 id → 动作的回查依据，用户点的就是他刚看到的那一版。
     pub flow: Option<Arc<gallery::FlowLayout>>,
     /// 记录流已展示的记录批次数，「显示更早」递增。
@@ -823,7 +840,7 @@ impl App {
         self.invalidate();
     }
 
-    /// 收起面内选择面板。
+    /// 收起面内选择浮层。
     pub(crate) fn close_picker(self: &Arc<App>) {
         if self.core().session.picker.take().is_some() {
             self.invalidate();
@@ -883,7 +900,7 @@ impl App {
 
     // ---------- 选择浮层 ----------
 
-    fn show_picker(self: &Arc<App>, title: &str, options: Vec<PickerOption>) {
+    fn show_picker(self: &Arc<App>, title: &str, options: Vec<PickerOption>, anchor_h: f32) {
         if options.is_empty() {
             self.set_notice(format!("{title}：没有可选项"));
             return;
@@ -892,7 +909,12 @@ impl App {
             .iter()
             .map(|option| gallery::digest(&option.action.stable_key()))
             .collect();
-        self.core().session.picker = Some(Picker { title: title.to_string(), options, ids });
+        let anchor = self
+            .core()
+            .session
+            .pointer
+            .map(|(x, y)| PickerAnchor { x, y, h: anchor_h });
+        self.core().session.picker = Some(Picker { title: title.to_string(), options, ids, anchor });
         self.invalidate();
     }
 
@@ -927,7 +949,7 @@ impl App {
                 })
                 .collect()
         };
-        self.show_picker("选择工作流", options);
+        self.show_picker("选择工作流", options, ANCHOR_H_WORKFLOW);
     }
 
     pub(crate) fn open_size_picker(self: &Arc<App>, control_id: &str) {
@@ -955,7 +977,7 @@ impl App {
                 action: PickerAction::Size { section: section.id, value: option.value.clone() },
             })
             .collect();
-        self.show_picker(&format!("选择{}", section.label), options);
+        self.show_picker(&format!("选择{}", section.label), options, ANCHOR_H_SIZE);
     }
 
     pub(crate) fn open_prompt_picker(self: &Arc<App>) {
@@ -979,7 +1001,7 @@ impl App {
             }));
             options
         };
-        self.show_picker("选择提示词来源", options);
+        self.show_picker("选择提示词来源", options, ANCHOR_H_PROMPT);
     }
 
     pub(crate) fn open_ref_picker(self: &Arc<App>, key: &str) {
@@ -1004,7 +1026,7 @@ impl App {
                 action: PickerAction::RefImage { key: key.to_string(), name },
             })
             .collect();
-        self.show_picker("选择参考图", options);
+        self.show_picker("选择参考图", options, ANCHOR_H_REF);
     }
 
     pub(crate) fn open_combo_picker(self: &Arc<App>, key: &str) {
@@ -1027,7 +1049,7 @@ impl App {
                 action: PickerAction::Combo { key: key.to_string(), submit },
             })
             .collect();
-        self.show_picker(&format!("选择{title}"), options);
+        self.show_picker(&format!("选择{title}"), options, ANCHOR_H_COMBO);
     }
 
     pub(crate) async fn apply_picker_action(self: &Arc<App>, action: PickerAction) {

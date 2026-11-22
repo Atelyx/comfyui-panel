@@ -42,6 +42,10 @@ pub fn draw_surface(app: &Arc<App>, frame: &mut DrawFrame<'_, '_>) {
 pub async fn handle_frame_input(app: &Arc<App>, params: FrameInputParams, ui: &mut FrameUi) {
     match params.surface_id.as_str() {
         SURFACE_PANEL => {
+            // 选择浮层要贴住触发控件：记下指针落点，供下一步开菜单时换算控件上沿。
+            if let FrameInput::PointerDown { x, y, .. } | FrameInput::PointerUp { x, y, .. } = &params.input {
+                app.core().session.pointer = Some((*x, *y));
+            }
             let events = ui
                 .event(&app.ctx, &params.input, |id| panel_value(app, id))
                 .await;
@@ -202,13 +206,19 @@ async fn click_panel(app: &Arc<App>, id: &str) {
             app.spawn_task(async move { worker.save_current_workflow().await });
         }
         views::ID_WF => app.open_workflow_picker(),
+        views::ID_EMPTY_WF => app.open_workflow_picker(),
+        views::ID_EMPTY_START => app.start_service(),
+        views::ID_EMPTY_REFRESH => {
+            let worker = app.clone();
+            app.spawn_task(async move { worker.refresh_status().await });
+        }
         views::ID_FLOW_MORE => app.show_earlier(),
         views::ID_PARAMS_TOGGLE => app.toggle_params(),
         views::ID_PARAMS_CLOSE => app.close_params(),
         views::ID_PROMPT_FIELD => app.open_prompt_picker(),
         views::ID_RATIO | views::ID_RESOLUTION | views::ID_COUNT => app.open_size_picker(id),
-        views::ID_PICKER_CLOSE => app.close_picker(),
-        views::ID_LB_CLOSE => app.close_lightbox(),
+        views::ID_PICKER_DISMISS => app.close_picker(),
+        views::ID_LB_DISMISS => app.close_lightbox(),
         views::ID_LB_COPY_PROMPT => {
             if let Some(prompt_id) = lightbox_prompt_id(app) {
                 let worker = app.clone();
@@ -267,7 +277,7 @@ async fn click_flow(app: &Arc<App>, id: &str) -> bool {
     true
 }
 
-/// 选择面板、节点分组与字段控件：id 前缀即控件类型，键为 `${节点id}.${输入名}`。
+/// 选择浮层、节点分组与字段控件：id 前缀即控件类型，键为 `${节点id}.${输入名}`。
 async fn click_control(app: &Arc<App>, id: &str) {
     if let Some(id) = id.strip_prefix(P_PICK) {
         let action = {
@@ -321,7 +331,7 @@ async fn click_control(app: &Arc<App>, id: &str) {
     }
 }
 
-/// Esc 收起最上层的行内面板：选择面板 → 灯箱 → 高级参数（面板态没有输入控件占焦点）。
+/// Esc 收起最上层的行内面板：选择浮层 → 灯箱 → 高级参数（面板态没有输入控件占焦点）。
 fn dismiss_on_escape(app: &Arc<App>, input: &FrameInput) {
     let FrameInput::Key { key: Key::Named { name: NamedKey::Escape }, action: KeyAction::Press, .. } = input else {
         return;

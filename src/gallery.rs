@@ -1012,7 +1012,7 @@ mod tests {
     fn empty_flow_has_no_hits_and_no_height() {
         let flow = layout(&FlowInput::default());
         assert!(flow.hits.is_empty());
-        assert_eq!(flow.height, 0.0, "空流不占画布高度，界面改给文字说明");
+        assert_eq!(flow.height, 0.0, "空流不占画布高度，界面另画空态");
     }
 
     /// 进行中的占位格内画进度条（轨道 + 填充），其他态只有空占位。
